@@ -156,11 +156,18 @@ def review_unreviewed(
             for r in skipped:
                 print(f"    {r.id}: SKIPPED (not in review batch)", file=sys.stderr)
 
+            if matched:
+                _update_db(conn, matched, retract_inaccurate=retract_inaccurate)
+
         except Exception as e:
             print(f"  WARN: batch {batch_num} failed: {e}", file=sys.stderr)
 
     if not dry_run and all_results:
-        _update_db(conn, all_results, retract_inaccurate=retract_inaccurate)
+        total_reviewed = sum(1 for r in all_results)
+        total_retracted = sum(1 for r in all_results if not r.accurate and retract_inaccurate)
+        print(f"\n  Updated {total_reviewed} belief(s) in reasons.db.", file=sys.stderr)
+        if total_retracted:
+            print(f"  Retracted {total_retracted} inaccurate belief(s).", file=sys.stderr)
 
     conn.close()
     return all_results
@@ -283,7 +290,4 @@ def _update_db(
             retracted += 1
 
     conn.commit()
-
-    print(f"\n  Updated {reviewed} belief(s) in reasons.db.", file=sys.stderr)
-    if retracted:
-        print(f"  Retracted {retracted} inaccurate belief(s).", file=sys.stderr)
+    return reviewed, retracted
