@@ -80,40 +80,23 @@ def test_parse_review_response_missing_fields():
 def reasons_db(tmp_path):
     """Create a reasons.db with unreviewed beliefs and source files."""
     db_path = tmp_path / "reasons.db"
-    conn = sqlite3.connect(str(db_path))
-    conn.executescript("""
-        CREATE TABLE nodes (
-            id TEXT PRIMARY KEY,
-            text TEXT NOT NULL,
-            truth_value TEXT NOT NULL DEFAULT 'IN',
-            supporting_justification INTEGER DEFAULT NULL,
-            source TEXT DEFAULT '',
-            source_url TEXT DEFAULT '',
-            source_hash TEXT DEFAULT '',
-            text_hash TEXT DEFAULT '',
-            date TEXT DEFAULT '',
-            metadata_json TEXT DEFAULT '{}',
-            created_at TEXT DEFAULT '',
-            updated_at TEXT DEFAULT '',
-            reviewed_at TEXT DEFAULT '',
-            verified_at TEXT DEFAULT '',
-            retracted_at TEXT DEFAULT ''
-        );
-    """)
+
+    from reasons.storage import Storage
+    store = Storage(str(db_path))
 
     src = tmp_path / "example.py"
     src.write_text("def hello():\n    return 'world'\n")
 
-    conn.execute(
+    store.conn.execute(
         "INSERT INTO nodes (id, text, truth_value, source, created_at) VALUES (?, ?, ?, ?, ?)",
         ("hello-returns-world", "hello() returns 'world'", "IN", str(src), "2026-01-01T00:00:00"),
     )
-    conn.execute(
+    store.conn.execute(
         "INSERT INTO nodes (id, text, truth_value, source, created_at, reviewed_at) VALUES (?, ?, ?, ?, ?, ?)",
         ("already-reviewed", "something", "IN", str(src), "2026-01-01T00:00:00", "2026-01-02T00:00:00"),
     )
-    conn.commit()
-    conn.close()
+    store.conn.commit()
+    store.conn.close()
     return db_path
 
 
@@ -128,9 +111,6 @@ def test_review_dry_run(reasons_db, capsys):
 def test_update_db_sets_reviewed_at(reasons_db):
     from worker_bee.reviewer import _update_db, ReviewResult
 
-    conn = sqlite3.connect(str(reasons_db))
-    conn.row_factory = sqlite3.Row
-
     results = [
         ReviewResult(
             id="hello-returns-world",
@@ -140,8 +120,10 @@ def test_update_db_sets_reviewed_at(reasons_db):
             comment="Correct",
         )
     ]
-    _update_db(conn, results)
+    _update_db(str(reasons_db), results)
 
+    conn = sqlite3.connect(str(reasons_db))
+    conn.row_factory = sqlite3.Row
     row = conn.execute("SELECT reviewed_at, metadata_json FROM nodes WHERE id = ?",
                        ("hello-returns-world",)).fetchone()
     assert row["reviewed_at"] != ""
@@ -154,9 +136,6 @@ def test_update_db_sets_reviewed_at(reasons_db):
 def test_update_db_retracts_inaccurate(reasons_db):
     from worker_bee.reviewer import _update_db, ReviewResult
 
-    conn = sqlite3.connect(str(reasons_db))
-    conn.row_factory = sqlite3.Row
-
     results = [
         ReviewResult(
             id="hello-returns-world",
@@ -166,8 +145,10 @@ def test_update_db_retracts_inaccurate(reasons_db):
             comment="Not what the source says",
         )
     ]
-    _update_db(conn, results, retract_inaccurate=True)
+    _update_db(str(reasons_db), results, retract_inaccurate=True)
 
+    conn = sqlite3.connect(str(reasons_db))
+    conn.row_factory = sqlite3.Row
     row = conn.execute("SELECT truth_value, retracted_at FROM nodes WHERE id = ?",
                        ("hello-returns-world",)).fetchone()
     assert row["truth_value"] == "OUT"
@@ -178,9 +159,6 @@ def test_update_db_retracts_inaccurate(reasons_db):
 def test_update_db_no_retract_by_default(reasons_db):
     from worker_bee.reviewer import _update_db, ReviewResult
 
-    conn = sqlite3.connect(str(reasons_db))
-    conn.row_factory = sqlite3.Row
-
     results = [
         ReviewResult(
             id="hello-returns-world",
@@ -190,8 +168,10 @@ def test_update_db_no_retract_by_default(reasons_db):
             comment="Not what the source says",
         )
     ]
-    _update_db(conn, results)
+    _update_db(str(reasons_db), results)
 
+    conn = sqlite3.connect(str(reasons_db))
+    conn.row_factory = sqlite3.Row
     row = conn.execute("SELECT truth_value FROM nodes WHERE id = ?",
                        ("hello-returns-world",)).fetchone()
     assert row["truth_value"] == "IN"

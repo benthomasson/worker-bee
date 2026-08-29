@@ -9,7 +9,7 @@ description = "Belief-driven orchestrator for small-context worker bees"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = ["ftl-reasons"]
 
 [project.optional-dependencies]
 test = ["pytest", "pytest-cov"]
@@ -21,6 +21,9 @@ worker-bee = "worker_bee.cli:main"
 
 [tool.setuptools]
 packages = ["worker_bee"]
+
+[tool.uv.sources]
+ftl-reasons = { path = "../ftl-reasons" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

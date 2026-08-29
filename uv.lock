@@ -343,6 +343,32 @@ wheels = [
 ]
 
 [[package]]
+name = "ftl-reasons"
+version = "0.53.0"
+source = { directory = "../ftl-reasons" }
+
+[package.metadata]
+requires-dist = [
+    { name = "langchain-anthropic", marker = "extra == 'api'", specifier = ">=0.3" },
+    { name = "langchain-anthropic", marker = "extra == 'llm'", specifier = ">=0.3" },
+    { name = "langchain-google-vertexai", marker = "extra == 'llm'", specifier = ">=2.0" },
+    { name = "langchain-google-vertexai", marker = "extra == 'vertex'", specifier = ">=2.0" },
+    { name = "langfuse", marker = "extra == 'langfuse'", specifier = ">=2.0" },
+    { name = "langfuse", marker = "extra == 'llm'", specifier = ">=2.0" },
+    { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.0" },
+    { name = "psycopg", extras = ["binary"], marker = "extra == 'pg'", specifier = ">=3.1" },
+    { name = "psycopg", extras = ["binary"], marker = "extra == 'test-pg'", specifier = ">=3.1" },
+    { name = "pytest", marker = "extra == 'test'" },
+    { name = "pytest", marker = "extra == 'test-pg'" },
+    { name = "pytest-cov", marker = "extra == 'test'" },
+    { name = "pytest-cov", marker = "extra == 'test-pg'" },
+    { name = "pyyaml", marker = "extra == 'test'" },
+    { name = "scikit-learn", marker = "extra == 'cluster'", specifier = ">=1.2" },
+    { name = "sentence-transformers", marker = "extra == 'cluster'", specifier = ">=2.2" },
+]
+provides-extras = ["test", "pg", "test-pg", "cluster", "mcp", "api", "vertex", "langfuse", "llm"]
+
+[[package]]
 name = "h11"
 version = "0.16.0"
 source = { registry = "https://pypi.org/simple" }
@@ -736,6 +762,9 @@ wheels = [
 name = "worker-bee"
 version = "0.1.0"
 source = { editable = "." }
+dependencies = [
+    { name = "ftl-reasons" },
+]
 
 [package.optional-dependencies]
 ollama = [
@@ -751,6 +780,7 @@ tokens = [
 
 [package.metadata]
 requires-dist = [
+    { name = "ftl-reasons", directory = "../ftl-reasons" },
     { name = "httpx", marker = "extra == 'ollama'", specifier = ">=0.27" },
     { name = "pytest", marker = "extra == 'test'" },
     { name = "pytest-cov", marker = "extra == 'test'" },

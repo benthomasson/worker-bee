@@ -157,7 +157,7 @@ def review_unreviewed(
                 print(f"    {r.id}: SKIPPED (not in review batch)", file=sys.stderr)
 
             if matched:
-                _update_db(conn, matched, retract_inaccurate=retract_inaccurate)
+                _update_db(str(db_path), matched, retract_inaccurate=retract_inaccurate)
 
         except Exception as e:
             print(f"  WARN: batch {batch_num} failed: {e}", file=sys.stderr)
@@ -251,43 +251,33 @@ def _parse_review_response(response: str) -> list[ReviewResult]:
 
 
 def _update_db(
-    conn: sqlite3.Connection,
+    db_path: str,
     results: list[ReviewResult],
     *,
     retract_inaccurate: bool = False,
 ) -> None:
-    """Write review results back to reasons.db."""
+    """Write review results back to reasons.db via ftl-reasons API."""
+    from reasons.api import retract_node, _with_network
+
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
-    reviewed = 0
-    retracted = 0
+    with _with_network(db_path, write=True) as net:
+        for r in results:
+            if r.id not in net.nodes:
+                continue
 
-    for r in results:
-        row = conn.execute("SELECT id, metadata_json FROM nodes WHERE id = ?", (r.id,)).fetchone()
-        if not row:
-            continue
+            node = net.nodes[r.id]
+            node.reviewed_at = now
+            node.updated_at = now
+            node.metadata["review_result"] = {
+                "accurate": r.accurate,
+                "well_scoped": r.well_scoped,
+                "error_type": r.error_type,
+                "comment": r.comment,
+                "reviewer": "worker-bee",
+            }
 
-        metadata = json.loads(row["metadata_json"] or "{}")
-        metadata["review_result"] = {
-            "accurate": r.accurate,
-            "well_scoped": r.well_scoped,
-            "error_type": r.error_type,
-            "comment": r.comment,
-            "reviewer": "worker-bee",
-        }
-
-        conn.execute(
-            "UPDATE nodes SET reviewed_at = ?, updated_at = ?, metadata_json = ? WHERE id = ?",
-            (now, now, json.dumps(metadata), r.id),
-        )
-        reviewed += 1
-
-        if retract_inaccurate and not r.accurate:
-            conn.execute(
-                "UPDATE nodes SET truth_value = 'OUT', retracted_at = ? WHERE id = ?",
-                (now, r.id),
-            )
-            retracted += 1
-
-    conn.commit()
-    return reviewed, retracted
+    if retract_inaccurate:
+        for r in results:
+            if not r.accurate:
+                retract_node(r.id, reason=f"worker-bee review: {r.error_type}", db_path=db_path)
