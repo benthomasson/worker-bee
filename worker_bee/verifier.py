@@ -1,7 +1,9 @@
-"""Verify a belief against source code via LLM."""
+"""Verify beliefs against source code via LLM."""
 
 from __future__ import annotations
 
+import json
+import sqlite3
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -60,6 +62,88 @@ class VerifyResult:
     confidence: str = ""
     evidence: str = ""
     comment: str = ""
+
+
+def verify_unverified(
+    db_path: str | Path,
+    *,
+    project_dir: str | Path | None = None,
+    model: str = "ollama:qwen3.8:27b",
+    limit: int | None = None,
+    dry_run: bool = False,
+    verbose: bool = False,
+) -> list[VerifyResult]:
+    """Verify unverified gated beliefs against source code."""
+    db_path = Path(db_path)
+    belief_ids = _find_unverified_gated(str(db_path))
+
+    if limit is not None:
+        belief_ids = belief_ids[:limit]
+
+    if not belief_ids:
+        print("No unverified gated beliefs found.", file=sys.stderr)
+        return []
+
+    print(f"Found {len(belief_ids)} unverified gated belief(s) to verify.", file=sys.stderr)
+    for bid in belief_ids:
+        print(f"  - {bid}", file=sys.stderr)
+
+    results: list[VerifyResult] = []
+    for i, bid in enumerate(belief_ids, 1):
+        print(f"\n[{i}/{len(belief_ids)}] Verifying {bid}...", file=sys.stderr)
+        try:
+            result = verify_belief(
+                db_path, bid,
+                project_dir=project_dir,
+                model=model,
+                dry_run=dry_run,
+                verbose=verbose,
+            )
+            results.append(result)
+        except Exception as e:
+            print(f"  WARN: {bid} failed: {e}", file=sys.stderr)
+
+    if not dry_run and results:
+        verified = sum(1 for r in results if r.verified)
+        not_verified = sum(1 for r in results if r.verified is False)
+        print(f"\n  Verified {verified}, not verified {not_verified} "
+              f"out of {len(results)} checked.", file=sys.stderr)
+
+    return results
+
+
+def _find_unverified_gated(db_path: str) -> list[str]:
+    """Find gated beliefs that haven't been verified yet."""
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+
+    rows = conn.execute("""
+        SELECT j.node_id, j.antecedents_json
+        FROM justifications j
+        JOIN nodes n ON n.id = j.node_id
+        WHERE n.truth_value = 'IN'
+          AND (n.verified_at IS NULL OR n.verified_at = '')
+    """).fetchall()
+
+    gated: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        antecedents = json.loads(row["antecedents_json"])
+        if not antecedents:
+            continue
+
+        placeholders = ",".join("?" for _ in antecedents)
+        out_count = conn.execute(
+            f"SELECT COUNT(*) as c FROM nodes WHERE id IN ({placeholders}) AND truth_value = 'OUT'",
+            antecedents,
+        ).fetchone()["c"]
+
+        if out_count > 0 and row["node_id"] not in seen:
+            seen.add(row["node_id"])
+            gated.append(row["node_id"])
+
+    conn.close()
+    return gated
 
 
 def verify_belief(

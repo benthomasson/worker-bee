@@ -55,11 +55,19 @@ def trace_belief(
     print(f"  Source: {row['source']}", file=sys.stderr)
     print(f"  Status: {row['truth_value']}", file=sys.stderr)
 
+    if not row["source"]:
+        print(f"  No source document.", file=sys.stderr)
+        return TraceResult(
+            belief_id=row["id"], belief_text=row["text"], source="",
+            summary_text="", code_refs=[], code_found=[], code_missing=[],
+            code_sections="",
+        )
+
     summary_path = Path(row["source"])
     if not summary_path.is_absolute():
         summary_path = db_path.parent / summary_path
 
-    if not summary_path.exists():
+    if not summary_path.is_file():
         print(f"  Source file not found: {summary_path}", file=sys.stderr)
         return TraceResult(
             belief_id=row["id"], belief_text=row["text"], source=row["source"],
