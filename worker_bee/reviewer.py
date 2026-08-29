@@ -111,16 +111,23 @@ def review_unreviewed(
     source_cache: dict[str, str] = {}
     all_results: list[ReviewResult] = []
 
-    batches = [rows[i:i + batch_size] for i in range(0, len(rows), batch_size)]
+    by_source: dict[str, list] = {}
+    for row in rows:
+        by_source.setdefault(row["source"], []).append(row)
+
+    batches = []
+    for source_rows in by_source.values():
+        for i in range(0, len(source_rows), batch_size):
+            batches.append(source_rows[i:i + batch_size])
 
     for batch_num, batch in enumerate(batches, 1):
+        source = batch[0]["source"]
         print(f"  Reviewing batch {batch_num}/{len(batches)} "
-              f"({len(batch)} beliefs)...", file=sys.stderr)
+              f"({len(batch)} beliefs, source: {source})...", file=sys.stderr)
+        for row in batch:
+            print(f"    - {row['id']}", file=sys.stderr)
 
-        beliefs_text = "\n\n".join(
-            _format_belief(row, source_cache, db_path.parent)
-            for row in batch
-        )
+        beliefs_text = _format_batch(batch, source, source_cache, db_path.parent)
         prompt = REVIEW_PROMPT.format(beliefs=beliefs_text)
 
         if dry_run or verbose:
@@ -159,21 +166,21 @@ def review_unreviewed(
     return all_results
 
 
-def _format_belief(row: sqlite3.Row, source_cache: dict, base_dir: Path) -> str:
-    """Format one belief with its source text for LLM review."""
-    lines = [f"### {row['id']}"]
-    lines.append(f"Claim: {row['text']}")
-
-    source = row["source"]
-    lines.append(f"Source reference: {source}")
-    lines.append("")
-
+def _format_batch(batch: list, source: str, source_cache: dict, base_dir: Path) -> str:
+    """Format a batch of beliefs sharing the same source document."""
     content = _load_source(source, source_cache, base_dir)
     content = _strip_beliefs_section(content)
-    lines.append("Source document content:")
+
+    lines = [f"## Source: {source}"]
     lines.append("```")
     lines.append(content)
     lines.append("```")
+    lines.append("")
+
+    for row in batch:
+        lines.append(f"### {row['id']}")
+        lines.append(f"Claim: {row['text']}")
+        lines.append("")
 
     return "\n".join(lines)
 
