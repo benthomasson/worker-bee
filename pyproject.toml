@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "worker-bee"
+version = "0.1.0"
+description = "Belief-driven orchestrator for small-context worker bees"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest", "pytest-cov"]
+ollama = ["httpx>=0.27"]
+
+[project.scripts]
+worker-bee = "worker_bee.cli:main"
+
+[tool.setuptools]
+packages = ["worker_bee"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
