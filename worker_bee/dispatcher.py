@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from worker_bee.llm import invoke_model, create_provider, ChatResponse, _record_cost
 
 
-DEFAULT_MODEL = "ollama:qwen3:27b"
+DEFAULT_MODEL = "ollama:qwen3.8:27b"
 
 
 @dataclass

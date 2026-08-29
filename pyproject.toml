@@ -14,6 +14,7 @@ dependencies = []
 [project.optional-dependencies]
 test = ["pytest", "pytest-cov"]
 ollama = ["httpx>=0.27"]
+tokens = ["tiktoken>=0.7"]
 
 [project.scripts]
 worker-bee = "worker_bee.cli:main"

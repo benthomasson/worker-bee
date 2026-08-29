@@ -73,10 +73,11 @@ class ReviewResult:
 def review_unreviewed(
     db_path: str | Path,
     *,
-    model: str = "ollama:qwen3:27b",
+    model: str = "ollama:qwen3.8:27b",
     batch_size: int = REVIEW_BATCH_SIZE,
     limit: int | None = None,
     dry_run: bool = False,
+    verbose: bool = False,
     retract_inaccurate: bool = False,
 ) -> list[ReviewResult]:
     """Review unreviewed beliefs against their source documents.
@@ -122,21 +123,31 @@ def review_unreviewed(
         )
         prompt = REVIEW_PROMPT.format(beliefs=beliefs_text)
 
-        if dry_run:
+        if dry_run or verbose:
+            from worker_bee.tokens import count_tokens
+            token_count = count_tokens(prompt)
             print(f"\n{'='*60}")
-            print(f"Batch {batch_num}/{len(batches)}")
+            print(f"Batch {batch_num}/{len(batches)} (~{token_count:,} tokens)")
             print(f"{'='*60}")
             print(prompt)
-            continue
+            if dry_run:
+                continue
 
         try:
             resp = dispatch(prompt, model=model)
             results = _parse_review_response(resp.text)
-            all_results.extend(results)
 
-            for r in results:
+            requested_ids = {row["id"] for row in batch}
+            matched = [r for r in results if r.id in requested_ids]
+            skipped = [r for r in results if r.id not in requested_ids]
+
+            all_results.extend(matched)
+
+            for r in matched:
                 status = "PASS" if r.accurate else f"FAIL ({r.error_type})"
                 print(f"    {r.id}: {status} — {r.comment}", file=sys.stderr)
+            for r in skipped:
+                print(f"    {r.id}: SKIPPED (not in review batch)", file=sys.stderr)
 
         except Exception as e:
             print(f"  WARN: batch {batch_num} failed: {e}", file=sys.stderr)
@@ -158,12 +169,23 @@ def _format_belief(row: sqlite3.Row, source_cache: dict, base_dir: Path) -> str:
     lines.append("")
 
     content = _load_source(source, source_cache, base_dir)
+    content = _strip_beliefs_section(content)
     lines.append("Source document content:")
     lines.append("```")
     lines.append(content)
     lines.append("```")
 
     return "\n".join(lines)
+
+
+def _strip_beliefs_section(content: str) -> str:
+    """Remove the '## Beliefs' section from source documents.
+
+    These sections list other belief IDs which confuse the model
+    into reviewing beliefs it wasn't asked about.
+    """
+    import re
+    return re.split(r'\n## Beliefs\b', content, maxsplit=1)[0].rstrip()
 
 
 def _load_source(source: str, cache: dict, base_dir: Path) -> str:

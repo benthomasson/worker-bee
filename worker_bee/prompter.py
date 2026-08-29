@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from worker_bee.tokens import count_tokens
+
 
 DEFAULT_TOKEN_BUDGET = 56000
 
@@ -48,9 +50,8 @@ def _source_section(issue: dict, token_budget: int) -> str:
     if not sources:
         return ""
 
-    char_budget = token_budget * 4
     parts = []
-    budget_remaining = char_budget
+    tokens_used = 0
 
     for src in sources:
         p = Path(src)
@@ -59,15 +60,17 @@ def _source_section(issue: dict, token_budget: int) -> str:
             continue
 
         content = p.read_text(errors="replace")
-        if len(content) > budget_remaining:
-            content = content[:budget_remaining] + "\n... [truncated]"
-            budget_remaining = 0
+        content_tokens = count_tokens(content)
+        if tokens_used + content_tokens > token_budget:
+            chars_remaining = (token_budget - tokens_used) * 3
+            content = content[:chars_remaining] + "\n... [truncated]"
+            tokens_used = token_budget
         else:
-            budget_remaining -= len(content)
+            tokens_used += content_tokens
 
         parts.append(f"## Source: {src}\n```\n{content}\n```")
 
-        if budget_remaining <= 0:
+        if tokens_used >= token_budget:
             break
 
     return "\n\n".join(parts)

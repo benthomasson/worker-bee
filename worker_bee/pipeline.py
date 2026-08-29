@@ -12,7 +12,7 @@ from worker_bee.dispatcher import dispatch
 def run_pipeline(
     db_path: str,
     *,
-    model: str = "ollama:qwen3:27b",
+    model: str = "ollama:qwen3.8:27b",
     dry_run: bool = False,
 ) -> list[dict]:
     """Run the first-milestone pipeline: extract → prompt → dispatch → print."""
@@ -29,8 +29,10 @@ def run_pipeline(
         prompt = build_prompt(issue)
 
         if dry_run:
+            from worker_bee.tokens import count_tokens
+            token_count = count_tokens(prompt)
             print(f"\n{'='*60}")
-            print(f"Issue: [{issue['type']}] {issue['belief_id']}")
+            print(f"Issue: [{issue['type']}] {issue['belief_id']} (~{token_count:,} tokens)")
             print(f"{'='*60}")
             print(prompt)
             results.append({"issue": issue, "prompt": prompt, "response": None})

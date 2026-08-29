@@ -248,6 +248,9 @@ def invoke_model(prompt: str, model: str = "claude", timeout: int = 300) -> str:
     if model.startswith("api:") or model.startswith("vertex:"):
         return _invoke_api(prompt, model, timeout)
 
+    if model.startswith("ollama:"):
+        return _invoke_ollama(prompt, model, timeout)
+
     cmd = resolve_model_cmd(model)
     binary = cmd[0]
     if not shutil.which(binary):
@@ -266,14 +269,50 @@ def invoke_model(prompt: str, model: str = "claude", timeout: int = 300) -> str:
     if result.returncode != 0:
         raise RuntimeError(f"{model} failed: {result.stderr}")
     output = result.stdout
-    # Fragile: ollama thinking markers may change across versions
-    if model.startswith("ollama:") and "Thinking...\n" in output:
+    return _parse_cli_json(output, model)
+
+
+def _invoke_ollama(prompt: str, model: str, timeout: int = 300) -> str:
+    """Invoke an Ollama model via HTTP API. Respects OLLAMA_HOST."""
+    ollama_model = model.split(":", 1)[1]
+    base_url = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+
+    payload = {
+        "model": ollama_model,
+        "prompt": prompt,
+        "stream": False,
+    }
+
+    data = json.dumps(payload).encode()
+    req = urllib.request.Request(
+        f"{base_url}/api/generate",
+        data=data,
+        headers={"Content-Type": "application/json"},
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            result = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        body = e.read().decode(errors="replace")
+        raise RuntimeError(f"Ollama error: {body}") from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(
+            f"Cannot connect to Ollama at {base_url} — is it running? ({e})"
+        ) from e
+
+    output = result.get("response", "")
+
+    prompt_tokens = result.get("prompt_eval_count", 0)
+    completion_tokens = result.get("eval_count", 0)
+    _record_cost(model, prompt_tokens, completion_tokens, 0.0)
+
+    if "Thinking...\n" in output:
         parts = output.split("...done thinking.\n", 1)
         if len(parts) == 2:
             output = parts[1]
-    if model.startswith("ollama:"):
-        return output
-    return _parse_cli_json(output, model)
+
+    return output
 
 
 # --- Tool-use chat providers ---
