@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 
-DEFAULT_TOKEN_BUDGET = 14000
+DEFAULT_TOKEN_BUDGET = 56000
 
 
 def build_prompt(issue: dict, *, token_budget: int = DEFAULT_TOKEN_BUDGET) -> str:

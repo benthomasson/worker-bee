@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -36,103 +37,118 @@ def extract(db_path: str | Path, *, types: list[str] | None = None) -> list[dict
 
 
 def _find_gated(conn: sqlite3.Connection) -> list[dict]:
-    """Find beliefs that are IN but depend on an OUT antecedent."""
+    """Find nodes that are IN but have an OUT antecedent."""
     rows = conn.execute("""
-        SELECT b.name, b.text, b.source
-        FROM beliefs b
-        JOIN justifications j ON j.belief_id = b.id
-        JOIN justification_antecedents ja ON ja.justification_id = j.id
-        JOIN beliefs ant ON ant.id = ja.antecedent_id
-        WHERE b.status = 'in'
-          AND ant.status = 'out'
+        SELECT j.node_id, j.antecedents_json, n.text, n.source
+        FROM justifications j
+        JOIN nodes n ON n.id = j.node_id
+        WHERE n.truth_value = 'IN'
     """).fetchall()
 
-    return [
-        {
-            "id": f"gated-{i}",
-            "type": "gated",
-            "belief_id": row["name"],
-            "belief_text": row["text"],
-            "source_files": _parse_sources(row["source"]),
-            "description": f"Belief is IN but has an OUT antecedent",
-        }
-        for i, row in enumerate(rows)
-    ]
+    issues = []
+    seen = set()
+    for row in rows:
+        antecedents = json.loads(row["antecedents_json"])
+        if not antecedents:
+            continue
+
+        placeholders = ",".join("?" for _ in antecedents)
+        out_ants = conn.execute(
+            f"SELECT id FROM nodes WHERE id IN ({placeholders}) AND truth_value = 'OUT'",
+            antecedents,
+        ).fetchall()
+
+        if out_ants and row["node_id"] not in seen:
+            seen.add(row["node_id"])
+            out_names = [r["id"] for r in out_ants]
+            issues.append({
+                "id": f"gated-{len(issues)}",
+                "type": "gated",
+                "belief_id": row["node_id"],
+                "belief_text": row["text"],
+                "source_files": _parse_sources(row["source"]),
+                "description": f"Node is IN but antecedent(s) {', '.join(out_names)} are OUT",
+            })
+
+    return issues
 
 
 def _find_contradictions(conn: sqlite3.Connection) -> list[dict]:
-    """Find nogood pairs where both beliefs are still IN."""
-    rows = conn.execute("""
-        SELECT n.id, b1.name AS name1, b1.text AS text1,
-               b2.name AS name2, b2.text AS text2
-        FROM nogoods n
-        JOIN nogood_members nm1 ON nm1.nogood_id = n.id
-        JOIN nogood_members nm2 ON nm2.nogood_id = n.id AND nm2.id > nm1.id
-        JOIN beliefs b1 ON b1.id = nm1.belief_id
-        JOIN beliefs b2 ON b2.id = nm2.belief_id
-        WHERE b1.status = 'in' AND b2.status = 'in'
-    """).fetchall()
+    """Find nogoods where all member nodes are still IN."""
+    rows = conn.execute("SELECT id, nodes_json FROM nogoods").fetchall()
 
-    return [
-        {
-            "id": f"contradiction-{i}",
-            "type": "contradiction",
-            "belief_id": f"{row['name1']} vs {row['name2']}",
-            "belief_text": f"{row['text1']} <-> {row['text2']}",
-            "source_files": [],
-            "description": f"Contradiction: both beliefs are IN",
-        }
-        for i, row in enumerate(rows)
-    ]
+    issues = []
+    for row in rows:
+        members = json.loads(row["nodes_json"])
+        if len(members) < 2:
+            continue
+
+        placeholders = ",".join("?" for _ in members)
+        in_count = conn.execute(
+            f"SELECT COUNT(*) as c FROM nodes WHERE id IN ({placeholders}) AND truth_value = 'IN'",
+            members,
+        ).fetchone()["c"]
+
+        if in_count == len(members):
+            issues.append({
+                "id": f"contradiction-{len(issues)}",
+                "type": "contradiction",
+                "belief_id": " vs ".join(members),
+                "belief_text": "",
+                "source_files": [],
+                "description": f"Nogood {row['id']}: all {len(members)} members are IN",
+            })
+
+    return issues
 
 
 def _find_stale(conn: sqlite3.Connection) -> list[dict]:
-    """Find beliefs whose source files may have changed."""
+    """Find nodes whose source files may have changed since derivation."""
     rows = conn.execute("""
-        SELECT name, text, source, derived_at
-        FROM beliefs
-        WHERE status = 'in'
-          AND source IS NOT NULL
-          AND derived_at IS NOT NULL
+        SELECT id, text, source, source_hash, created_at
+        FROM nodes
+        WHERE truth_value = 'IN'
+          AND source != ''
+          AND created_at != ''
     """).fetchall()
 
-    stale = []
-    for i, row in enumerate(rows):
+    issues = []
+    for row in rows:
         sources = _parse_sources(row["source"])
         for src in sources:
             p = Path(src)
-            if p.exists() and p.stat().st_mtime > _iso_to_ts(row["derived_at"]):
-                stale.append({
-                    "id": f"stale-{i}",
+            if p.exists() and p.stat().st_mtime > _iso_to_ts(row["created_at"]):
+                issues.append({
+                    "id": f"stale-{len(issues)}",
                     "type": "stale",
-                    "belief_id": row["name"],
+                    "belief_id": row["id"],
                     "belief_text": row["text"],
                     "source_files": sources,
-                    "description": f"Source file {src} modified after belief derivation",
+                    "description": f"Source file {src} modified after node creation",
                 })
                 break
 
-    return stale
+    return issues
 
 
 def _find_unreviewed(conn: sqlite3.Connection) -> list[dict]:
-    """Find derived beliefs that haven't been reviewed."""
+    """Find derived nodes that haven't been reviewed."""
     rows = conn.execute("""
-        SELECT name, text, source
-        FROM beliefs
-        WHERE status = 'in'
-          AND derived_at IS NOT NULL
-          AND reviewed_at IS NULL
+        SELECT id, text, source
+        FROM nodes
+        WHERE truth_value = 'IN'
+          AND created_at != ''
+          AND (reviewed_at IS NULL OR reviewed_at = '')
     """).fetchall()
 
     return [
         {
             "id": f"unreviewed-{i}",
             "type": "unreviewed",
-            "belief_id": row["name"],
+            "belief_id": row["id"],
             "belief_text": row["text"],
             "source_files": _parse_sources(row["source"]),
-            "description": "Derived belief has not been reviewed",
+            "description": "Derived node has not been reviewed",
         }
         for i, row in enumerate(rows)
     ]

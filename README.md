@@ -4,7 +4,7 @@ Belief-driven orchestrator for small-context worker bees.
 
 Worker-bee reads a [reasons](https://github.com/benthomasson/ftl-reasons) belief database, identifies actionable issues (gated beliefs, contradictions, staleness, unreviewed derivations), assembles focused prompts, and dispatches them to local models via [Ollama](https://ollama.com/).
 
-Each stage runs in a small context window (<16K tokens). The orchestrator is plain Python control flow — the LLM is the worker bee inside each stage.
+Each stage runs in a single context window (default budget: 56K tokens, targeting 64K context models). The orchestrator is plain Python control flow — the LLM is the worker bee inside each stage.
 
 ## Pipeline
 
@@ -53,7 +53,7 @@ worker-bee run path/to/reasons.db --dry-run
 ## Requirements
 
 - Python 3.10+
-- [Ollama](https://ollama.com/) with a local model (e.g. Qwen 3 27B)
+- [Ollama](https://ollama.com/) with a local model with 64K+ context (e.g. Qwen 3 27B)
 - A [reasons.db](https://github.com/benthomasson/ftl-reasons) belief database
 
 ## Tests
