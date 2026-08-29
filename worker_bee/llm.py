@@ -378,7 +378,7 @@ class _AnthropicProvider:
             from anthropic import Anthropic
             self.client = Anthropic()
 
-    def send(self, messages, system, tools, max_tokens=8096):
+    def send(self, messages, system, tools, max_tokens=8096, num_ctx=None):
         return self.client.messages.create(
             model=self.model,
             max_tokens=max_tokens,
@@ -400,15 +400,19 @@ class _OllamaProvider:
         self.base_url = base_url or os.environ.get("OLLAMA_HOST", "http://localhost:11434")
         self._tool_id_counter = 0
 
-    def send(self, messages, system, tools, max_tokens=8096):
+    def send(self, messages, system, tools, max_tokens=8096, num_ctx=None):
         ollama_messages = self._convert_messages(messages, system)
         ollama_tools = self._convert_tools(tools)
+
+        options = {"num_predict": max_tokens}
+        if num_ctx:
+            options["num_ctx"] = num_ctx
 
         payload = {
             "model": self.model,
             "messages": ollama_messages,
             "stream": False,
-            "options": {"num_predict": max_tokens},
+            "options": options,
         }
         if ollama_tools:
             payload["tools"] = ollama_tools

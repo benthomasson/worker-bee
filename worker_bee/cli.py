@@ -39,6 +39,26 @@ def main(argv: list[str] | None = None) -> int:
     sub_verify.add_argument("--dry-run", action="store_true", help="Print prompt without dispatching")
     sub_verify.add_argument("--verbose", "-v", action="store_true", help="Print prompt before dispatching")
 
+    sub_fix = subparsers.add_parser("fix", help="Fix a verified issue via code-editing loop")
+    sub_fix.add_argument("db", help="Path to reasons.db")
+    sub_fix.add_argument("belief_id", help="ID of the belief to fix")
+    sub_fix.add_argument("--project-dir", default=None, help="Path to the source project (guessed from db path if omitted)")
+    sub_fix.add_argument("--model", default="ollama:qwen3.8:27b", help="Model to use")
+    sub_fix.add_argument("--max-turns", type=int, default=20, help="Max conversation turns (default: 20)")
+    sub_fix.add_argument("--dry-run", action="store_true", help="Show the task prompt without running the edit loop")
+    sub_fix.add_argument("--verbose", "-v", action="store_true", help="Print full tool inputs and results")
+    sub_fix.add_argument("--confirm", action="store_true", help="Require Y/N confirmation before each tool call")
+    sub_fix.add_argument("--num-ctx", type=int, default=None, help="Ollama context window size (enables context tracking)")
+
+    sub_edit = subparsers.add_parser("edit", help="Run a code-editing loop with tool use")
+    sub_edit.add_argument("task", help="Description of the editing task")
+    sub_edit.add_argument("--model", default="ollama:qwen3.8:27b", help="Model to use")
+    sub_edit.add_argument("--max-turns", type=int, default=20, help="Max conversation turns (default: 20)")
+    sub_edit.add_argument("--dry-run", action="store_true", help="Show tool calls without executing them")
+    sub_edit.add_argument("--verbose", "-v", action="store_true", help="Print full tool inputs and results")
+    sub_edit.add_argument("--confirm", action="store_true", help="Require Y/N confirmation before each tool call")
+    sub_edit.add_argument("--num-ctx", type=int, default=None, help="Ollama context window size (enables context tracking)")
+
     sub_run = subparsers.add_parser("run", help="Run the full pipeline on a belief database")
     sub_run.add_argument("db", help="Path to reasons.db")
     sub_run.add_argument("--model", default="ollama:qwen3.8:27b", help="Model to use (e.g. ollama:qwen3.8:27b, claude, api:claude-sonnet-4-20250514)")
@@ -123,6 +143,34 @@ def main(argv: list[str] | None = None) -> int:
                 not_verified = sum(1 for r in results if r.verified is False)
                 print(f"\nSummary: {verified} verified, {not_verified} not verified "
                       f"out of {len(results)} checked.")
+        return 0
+
+    if args.command == "fix":
+        from worker_bee.fixer import fix_belief
+        session = fix_belief(
+            args.db,
+            args.belief_id,
+            project_dir=args.project_dir,
+            model=args.model,
+            max_turns=args.max_turns,
+            dry_run=args.dry_run,
+            verbose=args.verbose,
+            confirm=args.confirm,
+            num_ctx=args.num_ctx,
+        )
+        return 0
+
+    if args.command == "edit":
+        from worker_bee.editor import run_edit_loop
+        session = run_edit_loop(
+            args.task,
+            model=args.model,
+            max_turns=args.max_turns,
+            dry_run=args.dry_run,
+            verbose=args.verbose,
+            confirm=args.confirm,
+            num_ctx=args.num_ctx,
+        )
         return 0
 
     if args.command == "run":

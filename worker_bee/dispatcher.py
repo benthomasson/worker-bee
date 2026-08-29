@@ -46,6 +46,7 @@ def dispatch_chat(
     model: str = DEFAULT_MODEL,
     tools: list[dict] | None = None,
     max_tokens: int = 8096,
+    num_ctx: int | None = None,
 ) -> ChatResponse:
     """Send a multi-turn conversation with optional tool use.
 
@@ -53,7 +54,7 @@ def dispatch_chat(
     Returns a ChatResponse with content blocks (TextBlock, ToolUseBlock).
     """
     provider = create_provider(model)
-    return provider.send(messages, system, tools or [], max_tokens=max_tokens)
+    return provider.send(messages, system, tools or [], max_tokens=max_tokens, num_ctx=num_ctx)
 
 
 def dispatch_batch(
