@@ -12,7 +12,7 @@ from worker_bee.dispatcher import dispatch
 def run_pipeline(
     db_path: str,
     *,
-    model: str = "qwen3:27b",
+    model: str = "ollama:qwen3:27b",
     dry_run: bool = False,
 ) -> list[dict]:
     """Run the first-milestone pipeline: extract → prompt → dispatch → print."""

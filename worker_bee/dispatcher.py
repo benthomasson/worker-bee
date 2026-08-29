@@ -1,14 +1,13 @@
-"""Dispatch prompts to a local model via Ollama."""
+"""Dispatch prompts to LLMs via the shared llm module."""
 
 from __future__ import annotations
 
-import json
-import urllib.request
-import urllib.error
 from dataclasses import dataclass
 
+from worker_bee.llm import invoke_model, create_provider, ChatResponse, _record_cost
 
-DEFAULT_ENDPOINT = "http://localhost:11434"
+
+DEFAULT_MODEL = "ollama:qwen3:27b"
 
 
 @dataclass
@@ -22,42 +21,46 @@ class Response:
 def dispatch(
     prompt: str,
     *,
-    model: str = "qwen3:27b",
-    endpoint: str = DEFAULT_ENDPOINT,
+    model: str = DEFAULT_MODEL,
+    timeout: int = 300,
 ) -> Response:
-    """Send a prompt to Ollama and return the response."""
-    url = f"{endpoint}/api/generate"
-    payload = {
-        "model": model,
-        "prompt": prompt,
-        "stream": False,
-    }
+    """Send a single prompt to a model and return the response.
 
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json"},
-    )
-
-    try:
-        with urllib.request.urlopen(req, timeout=300) as resp:
-            body = json.loads(resp.read())
-    except urllib.error.URLError as e:
-        raise ConnectionError(f"Cannot reach Ollama at {endpoint}: {e}") from e
-
+    Uses invoke_model() for simple prompt-in/response-out calls.
+    Works with any supported model string: ollama:*, claude, gemini,
+    api:*, vertex:*.
+    """
+    text = invoke_model(prompt, model=model, timeout=timeout)
     return Response(
-        text=body.get("response", ""),
-        model=body.get("model", model),
-        prompt_tokens=body.get("prompt_eval_count", 0),
-        completion_tokens=body.get("eval_count", 0),
+        text=text,
+        model=model,
+        prompt_tokens=0,
+        completion_tokens=0,
     )
+
+
+def dispatch_chat(
+    messages: list[dict],
+    *,
+    system: str = "",
+    model: str = DEFAULT_MODEL,
+    tools: list[dict] | None = None,
+    max_tokens: int = 8096,
+) -> ChatResponse:
+    """Send a multi-turn conversation with optional tool use.
+
+    Uses create_provider() for the full chat API with tool support.
+    Returns a ChatResponse with content blocks (TextBlock, ToolUseBlock).
+    """
+    provider = create_provider(model)
+    return provider.send(messages, system, tools or [], max_tokens=max_tokens)
 
 
 def dispatch_batch(
     prompts: list[tuple[dict, str]],
     *,
-    model: str = "qwen3:27b",
-    endpoint: str = DEFAULT_ENDPOINT,
+    model: str = DEFAULT_MODEL,
+    timeout: int = 300,
 ) -> list[tuple[dict, Response]]:
     """Dispatch multiple (issue, prompt) pairs sequentially.
 
@@ -65,6 +68,6 @@ def dispatch_batch(
     """
     results = []
     for issue, prompt in prompts:
-        resp = dispatch(prompt, model=model, endpoint=endpoint)
+        resp = dispatch(prompt, model=model, timeout=timeout)
         results.append((issue, resp))
     return results

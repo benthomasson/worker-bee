@@ -18,7 +18,7 @@ def main(argv: list[str] | None = None) -> int:
 
     sub_run = subparsers.add_parser("run", help="Run the full pipeline on a belief database")
     sub_run.add_argument("db", help="Path to reasons.db")
-    sub_run.add_argument("--model", default="qwen3:27b", help="Ollama model to use")
+    sub_run.add_argument("--model", default="ollama:qwen3:27b", help="Model to use (e.g. ollama:qwen3:27b, claude, api:claude-sonnet-4-20250514)")
     sub_run.add_argument("--dry-run", action="store_true", help="Print prompts without dispatching")
 
     args = parser.parse_args(argv)
