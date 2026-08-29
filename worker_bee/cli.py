@@ -16,6 +16,14 @@ def main(argv: list[str] | None = None) -> int:
     sub_extract = subparsers.add_parser("extract", help="Extract issues from a belief database")
     sub_extract.add_argument("db", help="Path to reasons.db")
 
+    sub_review = subparsers.add_parser("review", help="Review unreviewed beliefs against source documents")
+    sub_review.add_argument("db", help="Path to reasons.db")
+    sub_review.add_argument("--model", default="ollama:qwen3:27b", help="Model to use (e.g. ollama:qwen3:27b, claude, api:claude-sonnet-4-20250514)")
+    sub_review.add_argument("--batch-size", type=int, default=5, help="Beliefs per LLM call (default: 5)")
+    sub_review.add_argument("--limit", type=int, default=None, help="Max beliefs to review")
+    sub_review.add_argument("--dry-run", action="store_true", help="Print prompts without dispatching")
+    sub_review.add_argument("--retract", action="store_true", help="Retract beliefs found to be inaccurate")
+
     sub_run = subparsers.add_parser("run", help="Run the full pipeline on a belief database")
     sub_run.add_argument("db", help="Path to reasons.db")
     sub_run.add_argument("--model", default="ollama:qwen3:27b", help="Model to use (e.g. ollama:qwen3:27b, claude, api:claude-sonnet-4-20250514)")
@@ -32,6 +40,22 @@ def main(argv: list[str] | None = None) -> int:
         issues = extract(args.db)
         for issue in issues:
             print(f"[{issue['type']}] {issue['belief_id']}: {issue['description']}")
+        return 0
+
+    if args.command == "review":
+        from worker_bee.reviewer import review_unreviewed
+        results = review_unreviewed(
+            args.db,
+            model=args.model,
+            batch_size=args.batch_size,
+            limit=args.limit,
+            dry_run=args.dry_run,
+            retract_inaccurate=args.retract,
+        )
+        if results:
+            accurate = sum(1 for r in results if r.accurate)
+            inaccurate = sum(1 for r in results if not r.accurate)
+            print(f"\nSummary: {accurate} accurate, {inaccurate} inaccurate out of {len(results)} reviewed.")
         return 0
 
     if args.command == "run":
