@@ -146,6 +146,56 @@ TOOLS = [
             "required": ["command"],
         },
     },
+    {
+        "name": "list_memory",
+        "description": (
+            "List your previous tool calls from this session. Returns an index "
+            "of tool call IDs, names, and short summaries. Use this when you need "
+            "to recall what you did earlier — old tool calls may have been evicted "
+            "from context but their results are still stored."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "retrieve_memory",
+        "description": (
+            "Retrieve the full result of a previous tool call by its ID. "
+            "Use after list_memory to pull back a specific result that may have "
+            "been evicted from context."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "integer",
+                    "description": "The tool call ID from list_memory",
+                },
+            },
+            "required": ["id"],
+        },
+    },
+    {
+        "name": "write_note",
+        "description": (
+            "Write a note to yourself for later reference. Notes are stored in "
+            "session memory and survive context eviction. Use this to record "
+            "intermediate findings, decisions, or plans so you don't have to "
+            "re-derive them if earlier turns are evicted."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "note": {
+                    "type": "string",
+                    "description": "The note to store",
+                },
+            },
+            "required": ["note"],
+        },
+    },
 ]
 
 

@@ -18,9 +18,14 @@ EDITOR_SYSTEM_PREFIX = """\
 You are a code editor working on a software project. You have tools to read,
 edit, and write files, search the codebase, and run commands.
 
+You also have memory tools: list_memory shows your prior tool calls,
+retrieve_memory pulls back a result that may have scrolled out of context,
+and write_note saves a note to yourself for later. Use these to keep track
+of your work across many turns.
+
 Work through your task step by step:
 1. Read the relevant files to understand the current code.
-2. Plan your changes.
+2. Plan your changes. Use write_note to record your plan.
 3. Make the edits using edit_file (preferred) or write_file.
 4. Run tests or build commands to verify your changes work.
 5. When done, summarize what you changed and why.
@@ -56,6 +61,70 @@ class EditSession:
 LOG_DIR = Path(".worker-bee/logs")
 
 
+class SessionMemory:
+    """Stores tool call history and notes for the memory tools."""
+
+    def __init__(self):
+        self._tool_calls: list[dict] = []
+        self._notes: list[str] = []
+
+    def record_tool_call(self, turn: int, name: str, tool_input: dict, result: str) -> int:
+        entry_id = len(self._tool_calls)
+        summary = self._summarize_call(name, tool_input)
+        self._tool_calls.append({
+            "id": entry_id,
+            "turn": turn,
+            "name": name,
+            "input": tool_input,
+            "summary": summary,
+            "result": result,
+        })
+        return entry_id
+
+    def list_calls(self) -> str:
+        if not self._tool_calls and not self._notes:
+            return "No tool calls or notes recorded yet."
+        lines = []
+        for tc in self._tool_calls:
+            lines.append(f"#{tc['id']} (turn {tc['turn']}): {tc['name']} — {tc['summary']}")
+        if self._notes:
+            lines.append("")
+            lines.append("Notes:")
+            for i, note in enumerate(self._notes):
+                lines.append(f"  [{i}] {note}")
+        return "\n".join(lines)
+
+    def retrieve(self, call_id: int) -> str:
+        if call_id < 0 or call_id >= len(self._tool_calls):
+            return f"No tool call with id {call_id}. Use list_memory to see available IDs."
+        tc = self._tool_calls[call_id]
+        result = tc["result"]
+        if len(result) > 4000:
+            result = result[:4000] + f"\n\n... ({len(result) - 4000} chars truncated)"
+        return f"#{tc['id']} {tc['name']}(turn {tc['turn']})\n\n{result}"
+
+    def add_note(self, note: str) -> str:
+        self._notes.append(note)
+        return f"Note saved. ({len(self._notes)} total)"
+
+    @staticmethod
+    def _summarize_call(name: str, tool_input: dict) -> str:
+        if name == "read_file":
+            return tool_input.get("path", "?")
+        if name == "write_file":
+            return tool_input.get("path", "?")
+        if name == "edit_file":
+            return tool_input.get("path", "?")
+        if name == "grep":
+            return f"pattern={tool_input.get('pattern', '?')}"
+        if name == "glob":
+            return f"pattern={tool_input.get('pattern', '?')}"
+        if name == "run_command":
+            cmd = tool_input.get("command", "?")
+            return cmd[:80]
+        return str(tool_input)[:80]
+
+
 def _estimate_tokens(text) -> int:
     """Rough token estimate: serialize to string and divide by 4."""
     if isinstance(text, str):
@@ -80,6 +149,7 @@ def run_edit_loop(
     when evicting old messages from the context window.
     """
     session = EditSession(task=task, model=model)
+    memory = SessionMemory()
     system = EDITOR_SYSTEM_PREFIX + task
     messages: list[dict] = [{"role": "user", "content": "Begin."}]
 
@@ -180,7 +250,13 @@ def run_edit_loop(
             if not isinstance(block, ToolUseBlock):
                 continue
 
-            if dry_run:
+            if block.name == "list_memory":
+                result_text = memory.list_calls()
+            elif block.name == "retrieve_memory":
+                result_text = memory.retrieve(block.input.get("id", -1))
+            elif block.name == "write_note":
+                result_text = memory.add_note(block.input.get("note", ""))
+            elif dry_run:
                 result_text = "(dry-run: tool not executed)"
             elif confirm:
                 if not verbose:
@@ -195,6 +271,9 @@ def run_edit_loop(
                     result_text = execute_tool(block.name, block.input)
             else:
                 result_text = execute_tool(block.name, block.input)
+
+            if block.name not in ("list_memory", "retrieve_memory", "write_note"):
+                memory.record_tool_call(turn, block.name, block.input, result_text)
 
             if verbose:
                 _print_tool_result_verbose(block.name, result_text, turn)
@@ -243,6 +322,13 @@ def _print_tool_call(block: ToolUseBlock) -> None:
         print(f"  -> glob({block.input.get('pattern', '?')})", file=sys.stderr)
     elif block.name == "run_command":
         print(f"  -> run_command({block.input.get('command', '?')[:100]})", file=sys.stderr)
+    elif block.name == "list_memory":
+        print(f"  -> list_memory()", file=sys.stderr)
+    elif block.name == "retrieve_memory":
+        print(f"  -> retrieve_memory(#{block.input.get('id', '?')})", file=sys.stderr)
+    elif block.name == "write_note":
+        note = block.input.get("note", "")
+        print(f"  -> write_note({note[:80]!r})", file=sys.stderr)
     else:
         print(f"  -> {block.name}({block.input})", file=sys.stderr)
 
