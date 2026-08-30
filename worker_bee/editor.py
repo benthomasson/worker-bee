@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from worker_bee.dispatcher import dispatch_chat
-from worker_bee.tools import TOOLS, execute_tool
+from worker_bee.tools import TOOLS, BELIEF_TOOLS, execute_tool, set_belief_db
 from worker_bee.llm import TextBlock, ToolUseBlock
 
 MAX_TURNS = 20
@@ -142,6 +142,7 @@ def run_edit_loop(
     confirm: bool = False,
     log_dir: str | Path | None = None,
     num_ctx: int | None = None,
+    db_path: str | None = None,
 ) -> EditSession:
     """Run a multi-turn code-editing conversation with tool use.
 
@@ -152,6 +153,11 @@ def run_edit_loop(
     memory = SessionMemory()
     system = EDITOR_SYSTEM_PREFIX + task
     messages: list[dict] = [{"role": "user", "content": "Begin."}]
+
+    tools = TOOLS[:]
+    if db_path:
+        set_belief_db(db_path)
+        tools.extend(BELIEF_TOOLS)
 
     ctx_limit = num_ctx or 0
     ctx_warn_threshold = int(ctx_limit * 0.80) if ctx_limit else 0
@@ -196,7 +202,7 @@ def run_edit_loop(
                 messages,
                 system=system,
                 model=model,
-                tools=TOOLS,
+                tools=tools,
                 num_ctx=num_ctx,
             )
         except RuntimeError as e:
@@ -329,6 +335,12 @@ def _print_tool_call(block: ToolUseBlock) -> None:
     elif block.name == "write_note":
         note = block.input.get("note", "")
         print(f"  -> write_note({note[:80]!r})", file=sys.stderr)
+    elif block.name == "show_belief":
+        print(f"  -> show_belief({block.input.get('id', '?')})", file=sys.stderr)
+    elif block.name == "search_beliefs":
+        print(f"  -> search_beliefs({block.input.get('query', '?')})", file=sys.stderr)
+    elif block.name == "list_blockers":
+        print(f"  -> list_blockers()", file=sys.stderr)
     else:
         print(f"  -> {block.name}({block.input})", file=sys.stderr)
 

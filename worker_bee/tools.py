@@ -198,8 +198,70 @@ TOOLS = [
     },
 ]
 
+BELIEF_TOOLS = [
+    {
+        "name": "show_belief",
+        "description": (
+            "Look up a belief by ID from the reasons database. Returns the belief's "
+            "text, truth value, source, justifications, dependents, and metadata."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "description": "The belief ID (e.g. 'wgpu-backend-is-mandatory')",
+                },
+            },
+            "required": ["id"],
+        },
+    },
+    {
+        "name": "search_beliefs",
+        "description": (
+            "Search for beliefs by keyword. Searches both belief IDs and text. "
+            "Returns matching beliefs with their truth values."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Keyword to search for in belief IDs and text",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max results to return (default: 20)",
+                },
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "list_blockers",
+        "description": (
+            "List beliefs that are blocking other beliefs (gated issues). "
+            "These are IN beliefs whose presence keeps other beliefs OUT. "
+            "This shows the most actionable issues in the belief network."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+]
+
 
 MAX_READ_LINES = 500
+
+
+_belief_db_path: str | None = None
+
+
+def set_belief_db(db_path: str | None) -> None:
+    """Set the reasons.db path for belief tools."""
+    global _belief_db_path
+    _belief_db_path = db_path
 
 
 def execute_tool(name: str, tool_input: dict) -> str:
@@ -220,6 +282,12 @@ def execute_tool(name: str, tool_input: dict) -> str:
         return _glob(tool_input["pattern"], tool_input.get("path", "."))
     elif name == "run_command":
         return _run_command(tool_input["command"])
+    elif name == "show_belief":
+        return _show_belief(tool_input["id"])
+    elif name == "search_beliefs":
+        return _search_beliefs(tool_input["query"], tool_input.get("limit", 20))
+    elif name == "list_blockers":
+        return _list_blockers()
     else:
         return f"Unknown tool: {name}"
 
@@ -338,3 +406,91 @@ def _run_command(command):
         return "Error: command timed out after 30 seconds"
     except Exception as e:
         return f"Error running command: {e}"
+
+
+def _show_belief(belief_id):
+    if not _belief_db_path:
+        return "Error: no belief database configured for this session"
+    try:
+        from reasons.api import show_node
+        node = show_node(belief_id, db_path=_belief_db_path)
+        lines = [
+            f"ID: {node['id']}",
+            f"Text: {node['text']}",
+            f"Truth value: {node['truth_value']}",
+            f"Source: {node.get('source', '')}",
+        ]
+        if node.get("verified_at"):
+            lines.append(f"Verified at: {node['verified_at']}")
+        if node.get("reviewed_at"):
+            lines.append(f"Reviewed at: {node['reviewed_at']}")
+        meta = node.get("metadata") or {}
+        if meta.get("verify_result"):
+            vr = meta["verify_result"]
+            lines.append(f"Verify result: verified={vr.get('verified')}, confidence={vr.get('confidence')}")
+            if vr.get("evidence"):
+                lines.append(f"Evidence: {vr['evidence']}")
+        if node.get("justifications"):
+            lines.append("Justifications:")
+            for j in node["justifications"]:
+                ant = ", ".join(j.get("antecedents", []))
+                out = ", ".join(j.get("outlist", []))
+                parts = []
+                if ant:
+                    parts.append(f"antecedents=[{ant}]")
+                if out:
+                    parts.append(f"outlist=[{out}]")
+                lines.append(f"  {j.get('type', '?')}: {', '.join(parts)}")
+        if node.get("dependents"):
+            lines.append(f"Dependents: {', '.join(node['dependents'])}")
+        return "\n".join(lines)
+    except KeyError:
+        return f"Belief '{belief_id}' not found"
+    except Exception as e:
+        return f"Error: {e}"
+
+
+def _search_beliefs(query, limit=20):
+    if not _belief_db_path:
+        return "Error: no belief database configured for this session"
+    try:
+        import sqlite3
+        conn = sqlite3.connect(_belief_db_path)
+        conn.row_factory = sqlite3.Row
+        pattern = f"%{query}%"
+        rows = conn.execute(
+            "SELECT id, text, truth_value FROM nodes "
+            "WHERE id LIKE ? OR text LIKE ? "
+            "ORDER BY truth_value DESC, id "
+            "LIMIT ?",
+            (pattern, pattern, limit),
+        ).fetchall()
+        conn.close()
+        if not rows:
+            return f"No beliefs matching '{query}'"
+        lines = []
+        for r in rows:
+            lines.append(f"[{r['truth_value']}] {r['id']}: {r['text'][:120]}")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error: {e}"
+
+
+def _list_blockers():
+    if not _belief_db_path:
+        return "Error: no belief database configured for this session"
+    try:
+        from reasons.api import list_gated
+        result = list_gated(db_path=_belief_db_path)
+        blockers = result.get("blockers", {})
+        if not blockers:
+            return "No gated beliefs found."
+        lines = [f"{result['blocker_count']} blocker(s) gating {result['gated_count']} belief(s):", ""]
+        for bid, info in blockers.items():
+            lines.append(f"[{bid}] {info['text'][:120]}")
+            for g in info["gated"]:
+                lines.append(f"  blocks: {g['id']}: {g['text'][:100]}")
+            lines.append("")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error: {e}"

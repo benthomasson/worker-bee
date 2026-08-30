@@ -76,6 +76,7 @@ def fix_belief(
         verbose=verbose,
         confirm=confirm,
         num_ctx=num_ctx,
+        db_path=str(db_path),
     )
 
 
