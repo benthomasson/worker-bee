@@ -37,6 +37,23 @@ targeted changes over rewriting entire files.
 
 """
 
+PROMPT_SYSTEM_PREFIX = """\
+You are a worker bee — a focused assistant with tools to read, edit, and
+write files, search the codebase, run commands, and query a belief database.
+
+You also have memory tools: list_memory shows your prior tool calls,
+retrieve_memory pulls back a result that may have scrolled out of context,
+and write_note saves a note to yourself for later. Use these to keep track
+of your work across many turns.
+
+Work through your task step by step. Use write_note to record your plan
+and intermediate findings. When you are done, summarize what you found
+or changed.
+
+## Task
+
+"""
+
 
 @dataclass
 class EditStep:
@@ -143,6 +160,7 @@ def run_edit_loop(
     log_dir: str | Path | None = None,
     num_ctx: int | None = None,
     db_path: str | None = None,
+    system_prefix: str | None = None,
 ) -> EditSession:
     """Run a multi-turn code-editing conversation with tool use.
 
@@ -151,7 +169,8 @@ def run_edit_loop(
     """
     session = EditSession(task=task, model=model)
     memory = SessionMemory()
-    system = EDITOR_SYSTEM_PREFIX + task
+    prefix = system_prefix if system_prefix is not None else EDITOR_SYSTEM_PREFIX
+    system = prefix + task
     messages: list[dict] = [{"role": "user", "content": "Begin."}]
 
     tools = TOOLS[:]

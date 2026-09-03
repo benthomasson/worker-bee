@@ -59,6 +59,16 @@ def main(argv: list[str] | None = None) -> int:
     sub_edit.add_argument("--confirm", action="store_true", help="Require Y/N confirmation before each tool call")
     sub_edit.add_argument("--num-ctx", type=int, default=None, help="Ollama context window size (enables context tracking)")
 
+    sub_prompt = subparsers.add_parser("prompt", help="Run a freeform prompt with tool use")
+    sub_prompt.add_argument("task", help="The prompt / task description")
+    sub_prompt.add_argument("--db", default=None, help="Path to reasons.db (enables belief query tools)")
+    sub_prompt.add_argument("--model", default="ollama:qwen3.8:27b", help="Model to use")
+    sub_prompt.add_argument("--max-turns", type=int, default=20, help="Max conversation turns (default: 20)")
+    sub_prompt.add_argument("--dry-run", action="store_true", help="Show tool calls without executing them")
+    sub_prompt.add_argument("--verbose", "-v", action="store_true", help="Print full tool inputs and results")
+    sub_prompt.add_argument("--confirm", action="store_true", help="Require Y/N confirmation before each tool call")
+    sub_prompt.add_argument("--num-ctx", type=int, default=None, help="Ollama context window size (enables context tracking)")
+
     sub_run = subparsers.add_parser("run", help="Run the full pipeline on a belief database")
     sub_run.add_argument("db", help="Path to reasons.db")
     sub_run.add_argument("--model", default="ollama:qwen3.8:27b", help="Model to use (e.g. ollama:qwen3.8:27b, claude, api:claude-sonnet-4-20250514)")
@@ -170,6 +180,21 @@ def main(argv: list[str] | None = None) -> int:
             verbose=args.verbose,
             confirm=args.confirm,
             num_ctx=args.num_ctx,
+        )
+        return 0
+
+    if args.command == "prompt":
+        from worker_bee.editor import run_edit_loop, PROMPT_SYSTEM_PREFIX
+        session = run_edit_loop(
+            args.task,
+            model=args.model,
+            max_turns=args.max_turns,
+            dry_run=args.dry_run,
+            verbose=args.verbose,
+            confirm=args.confirm,
+            num_ctx=args.num_ctx,
+            db_path=args.db,
+            system_prefix=PROMPT_SYSTEM_PREFIX,
         )
         return 0
 
