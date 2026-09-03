@@ -249,19 +249,135 @@ BELIEF_TOOLS = [
             "properties": {},
         },
     },
+    {
+        "name": "add_belief",
+        "description": (
+            "Add a new belief to the local belief database. The belief ID must "
+            "not already exist in either the local or hive database. Use this to "
+            "record findings, conclusions, or new claims discovered during the task."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "description": "Unique belief ID in kebab-case (e.g. 'dispatcher-retries-on-429')",
+                },
+                "text": {
+                    "type": "string",
+                    "description": "The belief text — a single atomic claim",
+                },
+                "source": {
+                    "type": "string",
+                    "description": "Provenance — where this belief came from (e.g. a file path)",
+                },
+            },
+            "required": ["id", "text"],
+        },
+    },
 ]
 
 
 MAX_READ_LINES = 500
 
 
-_belief_db_path: str | None = None
+class BeliefStore:
+    """Layered belief store: local brain (read/write) over hive (read-only).
+
+    Reads union both layers. Writes go to local only. ID conflicts
+    between layers are errors — no silent shadowing.
+    """
+
+    def __init__(self, local_path: str | None = None, hive_path: str | None = None):
+        self.local_path = local_path
+        self.hive_path = hive_path
+        if local_path:
+            self._ensure_db(local_path)
+        if local_path and hive_path:
+            self._check_id_conflicts()
+
+    @staticmethod
+    def _ensure_db(db_path: str) -> None:
+        """Initialize the database schema if it doesn't exist yet."""
+        import os
+        if not os.path.exists(db_path):
+            from reasons.api import init_db
+            init_db(db_path=db_path)
+        else:
+            from reasons.storage import Storage
+            store = Storage(db_path)
+            store.close()
+
+    @staticmethod
+    def _get_ids(db_path: str) -> set[str]:
+        import sqlite3
+        conn = sqlite3.connect(db_path)
+        try:
+            return {r[0] for r in conn.execute("SELECT id FROM nodes").fetchall()}
+        except sqlite3.OperationalError:
+            return set()
+        finally:
+            conn.close()
+
+    def _check_id_conflicts(self):
+        local_ids = self._get_ids(self.local_path) if self.local_path else set()
+        hive_ids = self._get_ids(self.hive_path) if self.hive_path else set()
+        overlap = local_ids & hive_ids
+        if overlap:
+            raise ValueError(f"Belief ID conflict between local and hive: {overlap}")
+
+    @property
+    def db_paths(self) -> list[str]:
+        """All database paths, local first."""
+        paths = []
+        if self.local_path:
+            paths.append(self.local_path)
+        if self.hive_path:
+            paths.append(self.hive_path)
+        return paths
+
+    @property
+    def has_any(self) -> bool:
+        return bool(self.local_path or self.hive_path)
+
+    def id_exists_in_hive(self, belief_id: str) -> bool:
+        if not self.hive_path:
+            return False
+        import sqlite3
+        conn = sqlite3.connect(self.hive_path)
+        row = conn.execute("SELECT 1 FROM nodes WHERE id = ?", (belief_id,)).fetchone()
+        conn.close()
+        return row is not None
+
+    def id_exists_in_local(self, belief_id: str) -> bool:
+        if not self.local_path:
+            return False
+        import sqlite3
+        conn = sqlite3.connect(self.local_path)
+        row = conn.execute("SELECT 1 FROM nodes WHERE id = ?", (belief_id,)).fetchone()
+        conn.close()
+        return row is not None
 
 
-def set_belief_db(db_path: str | None) -> None:
-    """Set the reasons.db path for belief tools."""
-    global _belief_db_path
-    _belief_db_path = db_path
+_belief_store = BeliefStore()
+
+
+def set_belief_db(db_path: str | None, brain_path: str | None = None) -> None:
+    """Configure the belief store.
+
+    db_path: the hive (read-only project beliefs)
+    brain_path: local brain (read/write session beliefs)
+
+    If only db_path is given and no brain_path, db_path is used as
+    both the hive and the writable layer (backwards compatible).
+    """
+    global _belief_store
+    if brain_path:
+        _belief_store = BeliefStore(local_path=brain_path, hive_path=db_path)
+    elif db_path:
+        _belief_store = BeliefStore(local_path=db_path)
+    else:
+        _belief_store = BeliefStore()
 
 
 def execute_tool(name: str, tool_input: dict) -> str:
@@ -288,6 +404,8 @@ def execute_tool(name: str, tool_input: dict) -> str:
         return _search_beliefs(tool_input["query"], tool_input.get("limit", 20))
     elif name == "list_blockers":
         return _list_blockers()
+    elif name == "add_belief":
+        return _add_belief(tool_input["id"], tool_input["text"], tool_input.get("source", ""))
     else:
         return f"Unknown tool: {name}"
 
@@ -409,11 +527,18 @@ def _run_command(command):
 
 
 def _show_belief(belief_id):
-    if not _belief_db_path:
+    if not _belief_store.has_any:
         return "Error: no belief database configured for this session"
     try:
         from reasons.api import show_node
-        node = show_node(belief_id, db_path=_belief_db_path)
+        for db_path in _belief_store.db_paths:
+            try:
+                node = show_node(belief_id, db_path=db_path)
+                break
+            except (KeyError, Exception):
+                continue
+        else:
+            return f"Belief '{belief_id}' not found"
         lines = [
             f"ID: {node['id']}",
             f"Text: {node['text']}",
@@ -444,32 +569,38 @@ def _show_belief(belief_id):
         if node.get("dependents"):
             lines.append(f"Dependents: {', '.join(node['dependents'])}")
         return "\n".join(lines)
-    except KeyError:
-        return f"Belief '{belief_id}' not found"
     except Exception as e:
         return f"Error: {e}"
 
 
 def _search_beliefs(query, limit=20):
-    if not _belief_db_path:
+    if not _belief_store.has_any:
         return "Error: no belief database configured for this session"
     try:
         import sqlite3
-        conn = sqlite3.connect(_belief_db_path)
-        conn.row_factory = sqlite3.Row
+        all_rows = []
+        seen_ids = set()
         pattern = f"%{query}%"
-        rows = conn.execute(
-            "SELECT id, text, truth_value FROM nodes "
-            "WHERE id LIKE ? OR text LIKE ? "
-            "ORDER BY truth_value DESC, id "
-            "LIMIT ?",
-            (pattern, pattern, limit),
-        ).fetchall()
-        conn.close()
-        if not rows:
+        for db_path in _belief_store.db_paths:
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT id, text, truth_value FROM nodes "
+                "WHERE id LIKE ? OR text LIKE ? "
+                "ORDER BY truth_value DESC, id",
+                (pattern, pattern),
+            ).fetchall()
+            conn.close()
+            for r in rows:
+                if r["id"] not in seen_ids:
+                    seen_ids.add(r["id"])
+                    all_rows.append(r)
+        all_rows.sort(key=lambda r: (r["truth_value"] != "IN", r["id"]))
+        all_rows = all_rows[:limit]
+        if not all_rows:
             return f"No beliefs matching '{query}'"
         lines = []
-        for r in rows:
+        for r in all_rows:
             lines.append(f"[{r['truth_value']}] {r['id']}: {r['text'][:120]}")
         return "\n".join(lines)
     except Exception as e:
@@ -477,16 +608,25 @@ def _search_beliefs(query, limit=20):
 
 
 def _list_blockers():
-    if not _belief_db_path:
+    if not _belief_store.has_any:
         return "Error: no belief database configured for this session"
     try:
         from reasons.api import list_gated
-        result = list_gated(db_path=_belief_db_path)
-        blockers = result.get("blockers", {})
-        if not blockers:
+        all_blockers = {}
+        total_blocker_count = 0
+        total_gated_count = 0
+        for db_path in _belief_store.db_paths:
+            result = list_gated(db_path=db_path)
+            blockers = result.get("blockers", {})
+            for bid, info in blockers.items():
+                if bid not in all_blockers:
+                    all_blockers[bid] = info
+            total_blocker_count += result.get("blocker_count", 0)
+            total_gated_count += result.get("gated_count", 0)
+        if not all_blockers:
             return "No gated beliefs found."
-        lines = [f"{result['blocker_count']} blocker(s) gating {result['gated_count']} belief(s):", ""]
-        for bid, info in blockers.items():
+        lines = [f"{total_blocker_count} blocker(s) gating {total_gated_count} belief(s):", ""]
+        for bid, info in all_blockers.items():
             lines.append(f"[{bid}] {info['text'][:120]}")
             for g in info["gated"]:
                 lines.append(f"  blocks: {g['id']}: {g['text'][:100]}")
@@ -494,3 +634,20 @@ def _list_blockers():
         return "\n".join(lines)
     except Exception as e:
         return f"Error: {e}"
+
+
+def _add_belief(belief_id, text, source=""):
+    if not _belief_store.has_any:
+        return "Error: no belief database configured for this session"
+    if not _belief_store.local_path:
+        return "Error: no writable belief database configured"
+    if _belief_store.id_exists_in_hive(belief_id):
+        return f"Error: belief '{belief_id}' already exists in hive. Use a different ID."
+    if _belief_store.id_exists_in_local(belief_id):
+        return f"Error: belief '{belief_id}' already exists in local database."
+    try:
+        from reasons.api import add_node
+        add_node(belief_id, text, source=source, db_path=_belief_store.local_path)
+        return f"Added belief '{belief_id}' [IN]"
+    except Exception as e:
+        return f"Error adding belief: {e}"

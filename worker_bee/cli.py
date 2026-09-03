@@ -49,6 +49,7 @@ def main(argv: list[str] | None = None) -> int:
     sub_fix.add_argument("--verbose", "-v", action="store_true", help="Print full tool inputs and results")
     sub_fix.add_argument("--confirm", action="store_true", help="Require Y/N confirmation before each tool call")
     sub_fix.add_argument("--num-ctx", type=int, default=None, help="Ollama context window size (enables context tracking)")
+    sub_fix.add_argument("--brain", default=None, help="Path to local brain reasons.db (read/write, layered over --db as hive)")
 
     sub_edit = subparsers.add_parser("edit", help="Run a code-editing loop with tool use")
     sub_edit.add_argument("task", help="Description of the editing task")
@@ -58,6 +59,8 @@ def main(argv: list[str] | None = None) -> int:
     sub_edit.add_argument("--verbose", "-v", action="store_true", help="Print full tool inputs and results")
     sub_edit.add_argument("--confirm", action="store_true", help="Require Y/N confirmation before each tool call")
     sub_edit.add_argument("--num-ctx", type=int, default=None, help="Ollama context window size (enables context tracking)")
+    sub_edit.add_argument("--db", default=None, help="Path to reasons.db (enables belief query tools)")
+    sub_edit.add_argument("--brain", default=None, help="Path to local brain reasons.db (read/write, layered over --db as hive)")
 
     sub_prompt = subparsers.add_parser("prompt", help="Run a freeform prompt with tool use")
     sub_prompt.add_argument("task", help="The prompt / task description")
@@ -69,6 +72,7 @@ def main(argv: list[str] | None = None) -> int:
     sub_prompt.add_argument("--confirm", action="store_true", help="Require Y/N confirmation before each tool call")
     sub_prompt.add_argument("--num-ctx", type=int, default=None, help="Ollama context window size (enables context tracking)")
     sub_prompt.add_argument("--entry-dir", default=None, help="Directory for the bee to write its summary entry (e.g. entries/)")
+    sub_prompt.add_argument("--brain", default=None, help="Path to local brain reasons.db (read/write, layered over --db as hive)")
 
     sub_summarize = subparsers.add_parser("summarize", help="Summarize a session log into an entry")
     sub_summarize.add_argument("log", help="Path to a session log (.jsonl)")
@@ -174,6 +178,7 @@ def main(argv: list[str] | None = None) -> int:
             verbose=args.verbose,
             confirm=args.confirm,
             num_ctx=args.num_ctx,
+            brain_path=args.brain,
         )
         return 0
 
@@ -187,6 +192,8 @@ def main(argv: list[str] | None = None) -> int:
             verbose=args.verbose,
             confirm=args.confirm,
             num_ctx=args.num_ctx,
+            db_path=args.db,
+            brain_path=args.brain,
         )
         return 0
 
@@ -201,6 +208,7 @@ def main(argv: list[str] | None = None) -> int:
             confirm=args.confirm,
             num_ctx=args.num_ctx,
             db_path=args.db,
+            brain_path=args.brain,
             system_prefix=PROMPT_SYSTEM_PREFIX,
             entry_dir=args.entry_dir,
         )

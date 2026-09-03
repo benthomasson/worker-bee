@@ -179,6 +179,7 @@ def run_edit_loop(
     log_dir: str | Path | None = None,
     num_ctx: int | None = None,
     db_path: str | None = None,
+    brain_path: str | None = None,
     system_prefix: str | None = None,
     entry_dir: str | Path | None = None,
 ) -> EditSession:
@@ -196,12 +197,24 @@ def run_edit_loop(
         entry_path = Path(entry_dir) / now.strftime("%Y/%m/%d") / f"{slug}.md"
         entry_path.parent.mkdir(parents=True, exist_ok=True)
         prefix = prefix.format(entry_path=entry_path)
+    else:
+        prefix = prefix.replace(
+            "\nWhen you are done, write a summary entry using write_file. The entry path\n"
+            "is: {entry_path}\n\n"
+            "The entry should contain:\n"
+            "- A short title as a markdown heading\n"
+            "- What the task was\n"
+            "- What you did (files read, edited, commands run)\n"
+            "- What you found or changed\n"
+            "- Any open questions or follow-up work needed\n",
+            "",
+        )
     system = prefix + task
     messages: list[dict] = [{"role": "user", "content": "Begin."}]
 
     tools = TOOLS[:]
-    if db_path:
-        set_belief_db(db_path)
+    if db_path or brain_path:
+        set_belief_db(db_path, brain_path=brain_path)
         tools.extend(BELIEF_TOOLS)
 
     ctx_limit = num_ctx or 0
@@ -386,6 +399,8 @@ def _print_tool_call(block: ToolUseBlock) -> None:
         print(f"  -> search_beliefs({block.input.get('query', '?')})", file=sys.stderr)
     elif block.name == "list_blockers":
         print(f"  -> list_blockers()", file=sys.stderr)
+    elif block.name == "add_belief":
+        print(f"  -> add_belief({block.input.get('id', '?')})", file=sys.stderr)
     else:
         print(f"  -> {block.name}({block.input})", file=sys.stderr)
 
