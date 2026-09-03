@@ -269,6 +269,8 @@ def _update_db(
             node = net.nodes[r.id]
             node.reviewed_at = now
             node.updated_at = now
+            if node.metadata is None:
+                node.metadata = {}
             node.metadata["review_result"] = {
                 "accurate": r.accurate,
                 "well_scoped": r.well_scoped,
