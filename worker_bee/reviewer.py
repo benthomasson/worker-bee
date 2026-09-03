@@ -160,7 +160,9 @@ def review_unreviewed(
                 _update_db(str(db_path), matched, retract_inaccurate=retract_inaccurate)
 
         except Exception as e:
+            import traceback
             print(f"  WARN: batch {batch_num} failed: {e}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
 
     if not dry_run and all_results:
         total_reviewed = sum(1 for r in all_results)
