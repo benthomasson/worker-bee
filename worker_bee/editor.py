@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -18,13 +19,16 @@ EDITOR_SYSTEM_PREFIX = """\
 You are a code editor working on a software project. You have tools to read,
 edit, and write files, search the codebase, and run commands.
 
-You also have memory tools: list_memory shows your prior tool calls,
-retrieve_memory pulls back a result that may have scrolled out of context,
-and write_note saves a note to yourself for later. Use these to keep track
-of your work across many turns.
+You have LIMITED CONTEXT. Earlier messages will be evicted as the conversation
+grows. To preserve your work:
+
+- After reading each file, immediately use write_note to record what you
+  learned. Do NOT read another file until you have noted your findings.
+- Use list_memory and retrieve_memory to recall earlier findings that may
+  have scrolled out of context.
 
 Work through your task step by step:
-1. Read the relevant files to understand the current code.
+1. Read the relevant files. Note findings after each read.
 2. Plan your changes. Use write_note to record your plan.
 3. Make the edits using edit_file (preferred) or write_file.
 4. Run tests or build commands to verify your changes work.
@@ -41,13 +45,18 @@ PROMPT_SYSTEM_PREFIX = """\
 You are a worker bee — a focused assistant with tools to read, edit, and
 write files, search the codebase, run commands, and query a belief database.
 
-You also have memory tools: list_memory shows your prior tool calls,
-retrieve_memory pulls back a result that may have scrolled out of context,
-and write_note saves a note to yourself for later. Use these to keep track
-of your work across many turns.
+You have LIMITED CONTEXT. Earlier messages will be evicted as the conversation
+grows. To preserve your work:
 
-Work through your task step by step. Use write_note to record your plan
-and intermediate findings.
+- After reading each file, immediately use write_note to record what you
+  learned. Do NOT read another file until you have noted your findings.
+- Use add_belief to record conclusions, discoveries, or claims you can
+  support. Each belief should be a single atomic claim.
+- Use list_memory and retrieve_memory to recall earlier findings that may
+  have scrolled out of context.
+
+Work through your task step by step. Start by using write_note to record
+your plan.
 
 When you are done, write a summary entry using write_file. The entry path
 is: {entry_path}
@@ -57,6 +66,7 @@ The entry should contain:
 - What the task was
 - What you did (files read, edited, commands run)
 - What you found or changed
+- Beliefs you added
 - Any open questions or follow-up work needed
 
 ## Task
@@ -198,16 +208,14 @@ def run_edit_loop(
         entry_path.parent.mkdir(parents=True, exist_ok=True)
         prefix = prefix.format(entry_path=entry_path)
     else:
-        prefix = prefix.replace(
-            "\nWhen you are done, write a summary entry using write_file. The entry path\n"
-            "is: {entry_path}\n\n"
-            "The entry should contain:\n"
-            "- A short title as a markdown heading\n"
-            "- What the task was\n"
-            "- What you did (files read, edited, commands run)\n"
-            "- What you found or changed\n"
-            "- Any open questions or follow-up work needed\n",
+        # Strip the summary-entry paragraph (it contains a {entry_path}
+        # placeholder that has no value to substitute). Use a regex so the
+        # strip keeps working even if the paragraph's wording changes.
+        prefix = re.sub(
+            r"\nWhen you are done, write a summary entry using write_file.*?(?=\n## Task)",
             "",
+            prefix,
+            flags=re.S,
         )
     system = prefix + task
     messages: list[dict] = [{"role": "user", "content": "Begin."}]
