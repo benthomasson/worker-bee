@@ -48,7 +48,7 @@ def main(argv: list[str] | None = None) -> int:
     sub_fix.add_argument("--dry-run", action="store_true", help="Show the task prompt without running the edit loop")
     sub_fix.add_argument("--verbose", "-v", action="store_true", help="Print full tool inputs and results")
     sub_fix.add_argument("--confirm", action="store_true", help="Require Y/N confirmation before each tool call")
-    sub_fix.add_argument("--num-ctx", type=int, default=None, help="Ollama context window size (enables context tracking)")
+    sub_fix.add_argument("--num-ctx", type=int, default=65536, help="Context window size in tokens (default: 65536)")
     sub_fix.add_argument("--brain", default=None, help="Path to local brain reasons.db (read/write, layered over --db as hive)")
 
     sub_edit = subparsers.add_parser("edit", help="Run a code-editing loop with tool use")
@@ -58,7 +58,7 @@ def main(argv: list[str] | None = None) -> int:
     sub_edit.add_argument("--dry-run", action="store_true", help="Show tool calls without executing them")
     sub_edit.add_argument("--verbose", "-v", action="store_true", help="Print full tool inputs and results")
     sub_edit.add_argument("--confirm", action="store_true", help="Require Y/N confirmation before each tool call")
-    sub_edit.add_argument("--num-ctx", type=int, default=None, help="Ollama context window size (enables context tracking)")
+    sub_edit.add_argument("--num-ctx", type=int, default=65536, help="Context window size in tokens (default: 65536)")
     sub_edit.add_argument("--db", default=None, help="Path to reasons.db (enables belief query tools)")
     sub_edit.add_argument("--brain", default=None, help="Path to local brain reasons.db (read/write, layered over --db as hive)")
 
@@ -70,14 +70,14 @@ def main(argv: list[str] | None = None) -> int:
     sub_prompt.add_argument("--dry-run", action="store_true", help="Show tool calls without executing them")
     sub_prompt.add_argument("--verbose", "-v", action="store_true", help="Print full tool inputs and results")
     sub_prompt.add_argument("--confirm", action="store_true", help="Require Y/N confirmation before each tool call")
-    sub_prompt.add_argument("--num-ctx", type=int, default=None, help="Ollama context window size (enables context tracking)")
-    sub_prompt.add_argument("--entry-dir", default=None, help="Directory for the bee to write its summary entry (e.g. entries/)")
+    sub_prompt.add_argument("--num-ctx", type=int, default=65536, help="Context window size in tokens (default: 65536)")
+    sub_prompt.add_argument("--entry-dir", default=".worker-bee/entries", help="Directory for the bee to write its summary entry (default: .worker-bee/entries/)")
     sub_prompt.add_argument("--brain", default=None, help="Path to local brain reasons.db (read/write, layered over --db as hive)")
 
     sub_summarize = subparsers.add_parser("summarize", help="Summarize a session log into an entry")
     sub_summarize.add_argument("log", help="Path to a session log (.jsonl)")
     sub_summarize.add_argument("--model", default="ollama:qwen3.8:27b", help="Model to use for summarization")
-    sub_summarize.add_argument("--entry-dir", default=None, help="Directory to write the summary entry")
+    sub_summarize.add_argument("--entry-dir", default=".worker-bee/summaries", help="Directory to write the summary entry (default: .worker-bee/summaries/)")
     sub_summarize.add_argument("--dry-run", action="store_true", help="Print the prompt without dispatching")
 
     sub_run = subparsers.add_parser("run", help="Run the full pipeline on a belief database")
