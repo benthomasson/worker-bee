@@ -5,3 +5,5 @@ dist/
 build/
 .venv/
 .pytest_cache/
+*.db
+.worker-bee/
