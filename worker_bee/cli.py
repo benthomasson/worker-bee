@@ -68,6 +68,13 @@ def main(argv: list[str] | None = None) -> int:
     sub_prompt.add_argument("--verbose", "-v", action="store_true", help="Print full tool inputs and results")
     sub_prompt.add_argument("--confirm", action="store_true", help="Require Y/N confirmation before each tool call")
     sub_prompt.add_argument("--num-ctx", type=int, default=None, help="Ollama context window size (enables context tracking)")
+    sub_prompt.add_argument("--entry-dir", default=None, help="Directory for the bee to write its summary entry (e.g. entries/)")
+
+    sub_summarize = subparsers.add_parser("summarize", help="Summarize a session log into an entry")
+    sub_summarize.add_argument("log", help="Path to a session log (.jsonl)")
+    sub_summarize.add_argument("--model", default="ollama:qwen3.8:27b", help="Model to use for summarization")
+    sub_summarize.add_argument("--entry-dir", default=None, help="Directory to write the summary entry")
+    sub_summarize.add_argument("--dry-run", action="store_true", help="Print the prompt without dispatching")
 
     sub_run = subparsers.add_parser("run", help="Run the full pipeline on a belief database")
     sub_run.add_argument("db", help="Path to reasons.db")
@@ -195,7 +202,20 @@ def main(argv: list[str] | None = None) -> int:
             num_ctx=args.num_ctx,
             db_path=args.db,
             system_prefix=PROMPT_SYSTEM_PREFIX,
+            entry_dir=args.entry_dir,
         )
+        return 0
+
+    if args.command == "summarize":
+        from worker_bee.summarizer import summarize_log
+        summary = summarize_log(
+            args.log,
+            model=args.model,
+            entry_dir=args.entry_dir,
+            dry_run=args.dry_run,
+        )
+        if summary:
+            print(summary)
         return 0
 
     if args.command == "run":

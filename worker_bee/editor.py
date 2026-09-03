@@ -47,8 +47,17 @@ and write_note saves a note to yourself for later. Use these to keep track
 of your work across many turns.
 
 Work through your task step by step. Use write_note to record your plan
-and intermediate findings. When you are done, summarize what you found
-or changed.
+and intermediate findings.
+
+When you are done, write a summary entry using write_file. The entry path
+is: {entry_path}
+
+The entry should contain:
+- A short title as a markdown heading
+- What the task was
+- What you did (files read, edited, commands run)
+- What you found or changed
+- Any open questions or follow-up work needed
 
 ## Task
 
@@ -142,6 +151,16 @@ class SessionMemory:
         return str(tool_input)[:80]
 
 
+def _slugify(text: str) -> str:
+    """Convert text to a kebab-case slug suitable for filenames."""
+    import re
+    slug = text.lower().strip()
+    slug = re.sub(r'[^a-z0-9\s-]', '', slug)
+    slug = re.sub(r'[\s_]+', '-', slug)
+    slug = re.sub(r'-+', '-', slug).strip('-')
+    return slug or "task"
+
+
 def _estimate_tokens(text) -> int:
     """Rough token estimate: serialize to string and divide by 4."""
     if isinstance(text, str):
@@ -161,6 +180,7 @@ def run_edit_loop(
     num_ctx: int | None = None,
     db_path: str | None = None,
     system_prefix: str | None = None,
+    entry_dir: str | Path | None = None,
 ) -> EditSession:
     """Run a multi-turn code-editing conversation with tool use.
 
@@ -170,6 +190,12 @@ def run_edit_loop(
     session = EditSession(task=task, model=model)
     memory = SessionMemory()
     prefix = system_prefix if system_prefix is not None else EDITOR_SYSTEM_PREFIX
+    if entry_dir:
+        now = datetime.now(timezone.utc)
+        slug = _slugify(task[:60])
+        entry_path = Path(entry_dir) / now.strftime("%Y/%m/%d") / f"{slug}.md"
+        entry_path.parent.mkdir(parents=True, exist_ok=True)
+        prefix = prefix.format(entry_path=entry_path)
     system = prefix + task
     messages: list[dict] = [{"role": "user", "content": "Begin."}]
 
