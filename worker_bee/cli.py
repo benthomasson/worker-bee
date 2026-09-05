@@ -74,6 +74,16 @@ def main(argv: list[str] | None = None) -> int:
     sub_prompt.add_argument("--entry-dir", default=".worker-bee/entries", help="Directory for the bee to write its summary entry (default: .worker-bee/entries/)")
     sub_prompt.add_argument("--brain", default=None, help="Path to local brain reasons.db (read/write, layered over --db as hive)")
 
+    sub_chat = subparsers.add_parser("chat", help="Interactive chat with a worker bee (fresh context each prompt)")
+    sub_chat.add_argument("--db", default=None, help="Path to reasons.db (enables belief query tools)")
+    sub_chat.add_argument("--brain", default=None, help="Path to local brain reasons.db (read/write, layered over --db as hive)")
+    sub_chat.add_argument("--model", default="ollama:qwen3.8:27b", help="Model to use")
+    sub_chat.add_argument("--max-turns", type=int, default=20, help="Max turns per prompt (default: 20)")
+    sub_chat.add_argument("--dry-run", action="store_true", help="Show tool calls without executing them")
+    sub_chat.add_argument("--verbose", "-v", action="store_true", help="Print full tool inputs and results")
+    sub_chat.add_argument("--confirm", action="store_true", help="Require Y/N confirmation before each tool call")
+    sub_chat.add_argument("--num-ctx", type=int, default=65536, help="Context window size in tokens (default: 65536)")
+
     sub_summarize = subparsers.add_parser("summarize", help="Summarize a session log into an entry")
     sub_summarize.add_argument("log", help="Path to a session log (.jsonl)")
     sub_summarize.add_argument("--model", default="ollama:qwen3.8:27b", help="Model to use for summarization")
@@ -211,6 +221,20 @@ def main(argv: list[str] | None = None) -> int:
             brain_path=args.brain,
             system_prefix=PROMPT_SYSTEM_PREFIX,
             entry_dir=args.entry_dir,
+        )
+        return 0
+
+    if args.command == "chat":
+        from worker_bee.chat import run_chat
+        run_chat(
+            model=args.model,
+            max_turns=args.max_turns,
+            dry_run=args.dry_run,
+            verbose=args.verbose,
+            confirm=args.confirm,
+            num_ctx=args.num_ctx,
+            db_path=args.db,
+            brain_path=args.brain,
         )
         return 0
 
