@@ -1,8 +1,9 @@
 """Interactive chat mode: REPL around the prompt command.
 
 Each user prompt gets a fresh context window. Knowledge accumulates
-in the brain db between rounds — the bee starts fresh every time
-but can search_beliefs to recall what it learned before.
+in the brain db (beliefs) and notes file between rounds — the bee
+starts fresh every time but can search_beliefs and list_notes to
+recall what it learned before.
 """
 
 from __future__ import annotations
@@ -20,19 +21,23 @@ write files, search the codebase, run commands, and query a belief database.
 You get a FRESH CONTEXT for every prompt. Your conversation history is NOT
 preserved between prompts. To remember things across prompts:
 
-- Use add_belief to record conclusions, discoveries, or claims. These
-  persist in your belief database and you can search_beliefs next time.
-- Use search_beliefs at the start of a task to recall prior findings.
+- Use list_notes at the start of every task to recall what previous rounds
+  recorded. Do NOT redo work that is already noted.
+- Use write_note to record findings as you work. Notes are PERSISTENT —
+  they survive across prompts and sessions.
+- Use add_belief to record durable conclusions, discoveries, or claims.
+  Notes are scratch; beliefs are knowledge.
+- Use search_beliefs to recall prior beliefs.
 
 Within a single prompt you have limited context. Take notes as you work:
 
 - After reading each file, immediately use write_note to record what you
   learned. Do NOT read another file until you have noted your findings.
 - Use list_memory and retrieve_memory to recall earlier findings that may
-  have scrolled out of context.
+  have scrolled out of context within this prompt.
 
-Work through your task step by step. Start by using write_note to record
-your plan.
+Work through your task step by step. Start by calling list_notes, then
+use write_note to record your plan.
 
 When you are done, use add_belief to record any lasting conclusions.
 
@@ -58,6 +63,7 @@ def run_chat(
         print(f"  hive: {db_path}", file=sys.stderr)
     if brain_path:
         print(f"  brain: {brain_path}", file=sys.stderr)
+    print(f"  notes: .worker-bee/notes.jsonl", file=sys.stderr)
     print(f"  model: {model}", file=sys.stderr)
     print(f"  context: {num_ctx} tokens", file=sys.stderr)
     print(file=sys.stderr)

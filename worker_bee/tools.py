@@ -571,8 +571,6 @@ def execute_tool(name: str, tool_input: dict) -> str:
         return _list_blockers()
     elif name == "add_belief":
         return _add_belief(tool_input["id"], tool_input["text"], tool_input.get("source", ""))
-    elif name == "write_note":
-        return _write_note(tool_input.get("note", ""))
     elif name == "list_notes":
         return _list_notes(limit=tool_input.get("limit", 50))
     elif name == "update_note":

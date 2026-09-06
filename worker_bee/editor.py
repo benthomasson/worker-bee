@@ -251,7 +251,9 @@ def run_edit_loop(
     when evicting old messages from the context window.
     """
     session = EditSession(task=task, model=model)
-    memory = SessionMemory()
+    notes_store = NoteStore(path=DEFAULT_NOTES_PATH)
+    set_notes_file(DEFAULT_NOTES_PATH)
+    memory = SessionMemory(notes_store=notes_store)
     prefix = system_prefix if system_prefix is not None else EDITOR_SYSTEM_PREFIX
     if entry_dir:
         now = datetime.now(timezone.utc)
@@ -380,6 +382,8 @@ def run_edit_loop(
                 result_text = memory.retrieve(block.input.get("id", -1))
             elif block.name == "write_note":
                 result_text = memory.add_note(block.input.get("note", ""))
+            elif block.name in ("list_notes", "update_note", "delete_note"):
+                result_text = execute_tool(block.name, block.input)
             elif dry_run:
                 result_text = "(dry-run: tool not executed)"
             elif confirm:
@@ -396,7 +400,8 @@ def run_edit_loop(
             else:
                 result_text = execute_tool(block.name, block.input)
 
-            if block.name not in ("list_memory", "retrieve_memory", "write_note"):
+            if block.name not in ("list_memory", "retrieve_memory", "write_note",
+                                  "list_notes", "update_note", "delete_note"):
                 memory.record_tool_call(turn, block.name, block.input, result_text)
 
             if verbose:
@@ -461,6 +466,12 @@ def _print_tool_call(block: ToolUseBlock) -> None:
         print(f"  -> list_blockers()", file=sys.stderr)
     elif block.name == "add_belief":
         print(f"  -> add_belief({block.input.get('id', '?')})", file=sys.stderr)
+    elif block.name == "list_notes":
+        print(f"  -> list_notes()", file=sys.stderr)
+    elif block.name == "update_note":
+        print(f"  -> update_note([{block.input.get('index', '?')}])", file=sys.stderr)
+    elif block.name == "delete_note":
+        print(f"  -> delete_note([{block.input.get('index', '?')}])", file=sys.stderr)
     else:
         print(f"  -> {block.name}({block.input})", file=sys.stderr)
 
