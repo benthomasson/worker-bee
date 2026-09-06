@@ -290,7 +290,7 @@ def run_edit_loop(
     system_tokens = _estimate_tokens(system)
     messages_tokens = _estimate_tokens(messages)
 
-    print(f"Task: {task[:200]}", file=sys.stderr)
+    print(f"Task: {task}", file=sys.stderr)
     print(f"Model: {model}", file=sys.stderr)
     print(f"Max turns: {max_turns}", file=sys.stderr)
     if ctx_limit:
