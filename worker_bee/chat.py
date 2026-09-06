@@ -8,8 +8,9 @@ recall what it learned before.
 
 from __future__ import annotations
 
-import readline  # noqa: F401 — enables line editing and history for input()
 import sys
+
+from prompt_toolkit import prompt as pt_prompt
 from pathlib import Path
 
 from worker_bee.editor import run_edit_loop, PROMPT_SYSTEM_PREFIX
@@ -73,7 +74,7 @@ def run_chat(
     round_num = 0
     while True:
         try:
-            task = input("bee> ").strip()
+            task = pt_prompt("bee> ").strip()
         except (EOFError, KeyboardInterrupt):
             print(file=sys.stderr)
             break

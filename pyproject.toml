@@ -9,7 +9,7 @@ description = "Belief-driven orchestrator for small-context worker bees"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
-dependencies = ["ftl-reasons"]
+dependencies = ["ftl-reasons", "prompt_toolkit"]
 
 [project.optional-dependencies]
 test = ["pytest", "pytest-cov"]
