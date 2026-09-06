@@ -48,6 +48,7 @@ def fix_belief(
     confirm: bool = False,
     num_ctx: int | None = None,
     brain_path: str | None = None,
+    truncate_chars: int | None = None,
 ) -> EditSession:
     """Fix a verified issue by running a code-editing loop with full context."""
     db_path = Path(db_path)
@@ -79,6 +80,7 @@ def fix_belief(
         num_ctx=num_ctx,
         db_path=str(db_path),
         brain_path=brain_path,
+        truncate_chars=truncate_chars,
     )
 
 

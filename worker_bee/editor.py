@@ -244,6 +244,7 @@ def run_edit_loop(
     brain_path: str | None = None,
     system_prefix: str | None = None,
     entry_dir: str | Path | None = None,
+    truncate_chars: int | None = None,
 ) -> EditSession:
     """Run a multi-turn code-editing conversation with tool use.
 
@@ -336,7 +337,8 @@ def run_edit_loop(
         assistant_content = []
         for block in response.content:
             if isinstance(block, TextBlock) and block.text.strip():
-                print(f"  {block.text[:200]}", file=sys.stderr)
+                display = block.text[:truncate_chars] if truncate_chars else block.text
+                print(f"  {display}", file=sys.stderr)
                 if verbose:
                     print(f"\n## Assistant (turn {turn})\n{block.text}")
                 _log_event(log, "text", turn=turn, text=block.text)
