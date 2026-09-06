@@ -248,6 +248,7 @@ def run_edit_loop(
     truncate_chars: int | None = None,
     ctx_limit_pct: float = 0.80,
     chat_mode: bool = False,
+    allow_questions: bool = True,
 ) -> EditSession:
     """Run a multi-turn code-editing conversation with tool use.
 
@@ -279,7 +280,7 @@ def run_edit_loop(
     messages: list[dict] = [{"role": "user", "content": "Begin."}]
 
     tools = TOOLS[:]
-    if chat_mode:
+    if chat_mode and allow_questions:
         tools.extend(CHAT_TOOLS)
     if db_path or brain_path:
         set_belief_db(db_path, brain_path=brain_path)

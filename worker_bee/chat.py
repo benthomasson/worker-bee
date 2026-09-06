@@ -63,6 +63,7 @@ def run_chat(
     brain_path: str | None = None,
     truncate_chars: int | None = None,
     ctx_limit_pct: float = 0.80,
+    allow_questions: bool = True,
 ) -> None:
     """Run an interactive chat loop."""
     print("worker-bee chat (type 'exit' or Ctrl-D to quit)", file=sys.stderr)
@@ -106,6 +107,7 @@ def run_chat(
                 truncate_chars=truncate_chars,
                 ctx_limit_pct=ctx_limit_pct,
                 chat_mode=True,
+                allow_questions=allow_questions,
             )
         except KeyboardInterrupt:
             print("\n  Interrupted.", file=sys.stderr)

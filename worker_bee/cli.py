@@ -91,6 +91,7 @@ def main(argv: list[str] | None = None) -> int:
     sub_chat.add_argument("--num-ctx", type=int, default=65536, help="Context window size in tokens (default: 65536)")
     sub_chat.add_argument("--truncate-chars", type=int, default=None, help="Truncate assistant output to N chars on stderr (default: no truncation)")
     sub_chat.add_argument("--ctx-limit-pct", type=float, default=0.80, help="Stop at this fraction of context window (0 to disable, default: 0.80)")
+    sub_chat.add_argument("--no-questions", action="store_true", help="Disable the ask_user_question tool")
 
     sub_summarize = subparsers.add_parser("summarize", help="Summarize a session log into an entry")
     sub_summarize.add_argument("log", help="Path to a session log (.jsonl)")
@@ -251,6 +252,7 @@ def main(argv: list[str] | None = None) -> int:
             brain_path=args.brain,
             truncate_chars=args.truncate_chars,
             ctx_limit_pct=args.ctx_limit_pct,
+            allow_questions=not args.no_questions,
         )
         return 0
 
