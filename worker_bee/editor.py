@@ -245,6 +245,7 @@ def run_edit_loop(
     system_prefix: str | None = None,
     entry_dir: str | Path | None = None,
     truncate_chars: int | None = None,
+    ctx_limit_pct: float = 0.80,
 ) -> EditSession:
     """Run a multi-turn code-editing conversation with tool use.
 
@@ -281,7 +282,7 @@ def run_edit_loop(
         tools.extend(BELIEF_TOOLS)
 
     ctx_limit = num_ctx or 0
-    ctx_warn_threshold = int(ctx_limit * 0.80) if ctx_limit else 0
+    ctx_warn_threshold = int(ctx_limit * ctx_limit_pct) if ctx_limit and ctx_limit_pct else 0
 
     log = _init_log(log_dir or LOG_DIR, task, model, dry_run)
     session.log_path = str(log["path"])

@@ -59,6 +59,7 @@ def run_chat(
     db_path: str | None = None,
     brain_path: str | None = None,
     truncate_chars: int | None = None,
+    ctx_limit_pct: float = 0.80,
 ) -> None:
     """Run an interactive chat loop."""
     print("worker-bee chat (type 'exit' or Ctrl-D to quit)", file=sys.stderr)
@@ -99,6 +100,7 @@ def run_chat(
             brain_path=brain_path,
             system_prefix=CHAT_SYSTEM_PREFIX,
             truncate_chars=truncate_chars,
+            ctx_limit_pct=ctx_limit_pct,
         )
 
         print(file=sys.stderr)
