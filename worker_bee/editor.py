@@ -311,8 +311,8 @@ def run_edit_loop(
         if verbose:
             print(f"  Tokens — system: ~{system_tokens}  messages: ~{messages_tokens}  total: ~{total_est}", file=sys.stderr)
 
-        if ctx_warn_threshold:
-            if total_est > ctx_warn_threshold:
+        if ctx_limit:
+            if ctx_warn_threshold and total_est > ctx_warn_threshold:
                 print(f"  Context {total_est}/{ctx_limit} tokens — stopping to avoid overflow.", file=sys.stderr)
                 _log_event(log, "context_limit", turn=turn, estimated_tokens=total_est, limit=ctx_limit)
                 break
