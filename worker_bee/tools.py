@@ -265,6 +265,28 @@ TOOLS = [
     },
 ]
 
+CHAT_TOOLS = [
+    {
+        "name": "ask_user_question",
+        "description": (
+            "Ask the user a clarifying question and wait for their response. "
+            "Use this when you need more information to proceed — e.g. which "
+            "approach to take, what file to focus on, or confirmation before "
+            "a destructive action. The user's answer is returned as the tool result."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": "The question to ask the user",
+                },
+            },
+            "required": ["question"],
+        },
+    },
+]
+
 BELIEF_TOOLS = [
     {
         "name": "show_belief",

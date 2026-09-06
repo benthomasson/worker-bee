@@ -41,6 +41,9 @@ Within a single prompt you have limited context. Take notes as you work:
 Work through your task step by step. Start by calling list_notes, then
 use write_note to record your plan.
 
+If you are unsure about something, use ask_user_question to ask the user
+for clarification before proceeding.
+
 When you are done, use add_belief to record any lasting conclusions.
 
 ## Task
@@ -88,19 +91,23 @@ def run_chat(
         round_num += 1
         print(f"\n--- Round {round_num} ---", file=sys.stderr)
 
-        run_edit_loop(
-            task,
-            model=model,
-            max_turns=max_turns,
-            dry_run=dry_run,
-            verbose=verbose,
-            confirm=confirm,
-            num_ctx=num_ctx,
-            db_path=db_path,
-            brain_path=brain_path,
-            system_prefix=CHAT_SYSTEM_PREFIX,
-            truncate_chars=truncate_chars,
-            ctx_limit_pct=ctx_limit_pct,
-        )
+        try:
+            run_edit_loop(
+                task,
+                model=model,
+                max_turns=max_turns,
+                dry_run=dry_run,
+                verbose=verbose,
+                confirm=confirm,
+                num_ctx=num_ctx,
+                db_path=db_path,
+                brain_path=brain_path,
+                system_prefix=CHAT_SYSTEM_PREFIX,
+                truncate_chars=truncate_chars,
+                ctx_limit_pct=ctx_limit_pct,
+                chat_mode=True,
+            )
+        except KeyboardInterrupt:
+            print("\n  Interrupted.", file=sys.stderr)
 
         print(file=sys.stderr)

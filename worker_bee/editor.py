@@ -13,6 +13,7 @@ from worker_bee.dispatcher import dispatch_chat
 from worker_bee.tools import (
     TOOLS,
     BELIEF_TOOLS,
+    CHAT_TOOLS,
     DEFAULT_NOTES_PATH,
     NoteStore,
     execute_tool,
@@ -246,6 +247,7 @@ def run_edit_loop(
     entry_dir: str | Path | None = None,
     truncate_chars: int | None = None,
     ctx_limit_pct: float = 0.80,
+    chat_mode: bool = False,
 ) -> EditSession:
     """Run a multi-turn code-editing conversation with tool use.
 
@@ -277,6 +279,8 @@ def run_edit_loop(
     messages: list[dict] = [{"role": "user", "content": "Begin."}]
 
     tools = TOOLS[:]
+    if chat_mode:
+        tools.extend(CHAT_TOOLS)
     if db_path or brain_path:
         set_belief_db(db_path, brain_path=brain_path)
         tools.extend(BELIEF_TOOLS)
@@ -379,7 +383,16 @@ def run_edit_loop(
             if not isinstance(block, ToolUseBlock):
                 continue
 
-            if block.name == "list_memory":
+            if block.name == "ask_user_question":
+                question = block.input.get("question", "")
+                print(f"\n  Bee asks: {question}", file=sys.stderr)
+                try:
+                    from prompt_toolkit import prompt as pt_prompt
+                    answer = pt_prompt("answer> ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    answer = "(no answer)"
+                result_text = answer
+            elif block.name == "list_memory":
                 result_text = memory.list_calls()
             elif block.name == "retrieve_memory":
                 result_text = memory.retrieve(block.input.get("id", -1))
@@ -404,7 +417,8 @@ def run_edit_loop(
                 result_text = execute_tool(block.name, block.input)
 
             if block.name not in ("list_memory", "retrieve_memory", "write_note",
-                                  "list_notes", "update_note", "delete_note"):
+                                  "list_notes", "update_note", "delete_note",
+                                  "ask_user_question"):
                 memory.record_tool_call(turn, block.name, block.input, result_text)
 
             if verbose:
@@ -461,6 +475,8 @@ def _print_tool_call(block: ToolUseBlock) -> None:
     elif block.name == "write_note":
         note = block.input.get("note", "")
         print(f"  -> write_note({note[:80]!r})", file=sys.stderr)
+    elif block.name == "ask_user_question":
+        print(f"  -> ask_user_question()", file=sys.stderr)
     elif block.name == "show_belief":
         print(f"  -> show_belief({block.input.get('id', '?')})", file=sys.stderr)
     elif block.name == "search_beliefs":
