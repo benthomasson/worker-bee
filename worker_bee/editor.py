@@ -10,7 +10,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from worker_bee.dispatcher import dispatch_chat
-from worker_bee.tools import TOOLS, BELIEF_TOOLS, execute_tool, set_belief_db
+from worker_bee.tools import (
+    TOOLS,
+    BELIEF_TOOLS,
+    DEFAULT_NOTES_PATH,
+    NoteStore,
+    execute_tool,
+    set_belief_db,
+    set_notes_file,
+)
 from worker_bee.llm import TextBlock, ToolUseBlock
 
 MAX_TURNS = 20
@@ -22,17 +30,27 @@ edit, and write files, search the codebase, and run commands.
 You have LIMITED CONTEXT. Earlier messages will be evicted as the conversation
 grows. To preserve your work:
 
+- At the start of a session, call list_notes to see anything a previous
+  session recorded — do not redo work that has already been noted down.
 - After reading each file, immediately use write_note to record what you
   learned. Do NOT read another file until you have noted your findings.
 - Use list_memory and retrieve_memory to recall earlier findings that may
-  have scrolled out of context.
+  have scrolled out of context within this session.
+- Notes are PERSISTENT: they are saved to a shared project-level notes
+  file (usually .worker-bee/notes.jsonl) and reloaded at the start of the
+  next session. Use list_notes / update_note / delete_note to manage them
+  across sessions.
+- For durable conclusions, discoveries, or claims you can support, graduate
+  them out of notes and into the belief database with add_belief. Notes are
+  scratch; beliefs are knowledge.
 
 Work through your task step by step:
-1. Read the relevant files. Note findings after each read.
+1. Check existing notes with list_notes. Read the relevant files. Note findings after each read.
 2. Plan your changes. Use write_note to record your plan.
 3. Make the edits using edit_file (preferred) or write_file.
 4. Run tests or build commands to verify your changes work.
-5. When done, summarize what you changed and why.
+5. When done, summarize what you changed and why. If there are lasting
+   conclusions, graduate them into add_belief.
 
 Be precise with edits. Always read a file before editing it. Prefer small,
 targeted changes over rewriting entire files.
@@ -48,12 +66,20 @@ write files, search the codebase, run commands, and query a belief database.
 You have LIMITED CONTEXT. Earlier messages will be evicted as the conversation
 grows. To preserve your work:
 
+- At the start of a session, call list_notes to see anything a previous
+  session recorded — do not redo work that has already been noted down.
 - After reading each file, immediately use write_note to record what you
   learned. Do NOT read another file until you have noted your findings.
 - Use add_belief to record conclusions, discoveries, or claims you can
   support. Each belief should be a single atomic claim.
 - Use list_memory and retrieve_memory to recall earlier findings that may
-  have scrolled out of context.
+  have scrolled out of context within this session.
+- Notes are PERSISTENT: they are saved to a shared project-level notes
+  file (usually .worker-bee/notes.jsonl) and reloaded at the start of the
+  next session. Use list_notes / update_note / delete_note to manage them
+  across sessions.
+- For durable conclusions, graduate them out of notes and into the belief
+  database with add_belief. Notes are scratch; beliefs are knowledge.
 
 Work through your task step by step. Start by using write_note to record
 your plan.
@@ -98,11 +124,24 @@ LOG_DIR = Path(".worker-bee/logs")
 
 
 class SessionMemory:
-    """Stores tool call history and notes for the memory tools."""
+    """Stores tool call history and notes for the memory tools.
 
-    def __init__(self):
+    Notes are kept both in-memory (for quick list_memory retrieval) and, if
+    a NoteStore is supplied, in a persistent project-level notes file. The
+    NoteStore is the source of truth for persistent notes; this object just
+    mirrors them for fast in-process access.
+    """
+
+    def __init__(self, notes_store: NoteStore | None = None):
         self._tool_calls: list[dict] = []
-        self._notes: list[str] = []
+        # Mirror the persistent notes in-memory so list_memory can show them
+        # without re-reading the file each call.
+        self._notes: list[str] = (
+            [e["note"] for e in notes_store.list()]
+            if notes_store is not None and notes_store.enabled
+            else []
+        )
+        self.notes_store = notes_store
 
     def record_tool_call(self, turn: int, name: str, tool_input: dict, result: str) -> int:
         entry_id = len(self._tool_calls)
@@ -125,9 +164,11 @@ class SessionMemory:
             lines.append(f"#{tc['id']} (turn {tc['turn']}): {tc['name']} — {tc['summary']}")
         if self._notes:
             lines.append("")
-            lines.append("Notes:")
+            lines.append(f"Notes ({len(self._notes)} total):")
             for i, note in enumerate(self._notes):
                 lines.append(f"  [{i}] {note}")
+            if self.notes_store is not None and self.notes_store.enabled:
+                lines.append(f"  (persistent store: {self.notes_store.path})")
         return "\n".join(lines)
 
     def retrieve(self, call_id: int) -> str:
@@ -140,6 +181,17 @@ class SessionMemory:
         return f"#{tc['id']} {tc['name']}(turn {tc['turn']})\n\n{result}"
 
     def add_note(self, note: str) -> str:
+        """Add a note. Routes through the persistent store if configured."""
+        if self.notes_store is not None and self.notes_store.enabled:
+            try:
+                idx = self.notes_store.add(note)
+            except Exception as e:
+                # Fall back to in-memory only rather than losing the note.
+                self._notes.append(note)
+                return f"Note saved in-memory only (persistence error: {e}). " \
+                       f"({len(self._notes)} total)"
+            self._notes.append(note)
+            return f"Note saved. ({idx + 1} total) [persisted to {self.notes_store.path}]"
         self._notes.append(note)
         return f"Note saved. ({len(self._notes)} total)"
 

@@ -8,9 +8,13 @@ requests it.
 from __future__ import annotations
 
 import glob as glob_module
+import json
 import os
 import re
 import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
 
 
 TOOLS = [
@@ -181,9 +185,13 @@ TOOLS = [
         "name": "write_note",
         "description": (
             "Write a note to yourself for later reference. Notes are stored in "
-            "session memory and survive context eviction. Use this to record "
-            "intermediate findings, decisions, or plans so you don't have to "
-            "re-derive them if earlier turns are evicted."
+            "a persistent project-level notes file (survives context eviction "
+            "AND is reloaded at the start of future sessions), and also in the "
+            "in-memory session store. Use this to record intermediate findings, "
+            "decisions, or plans so you don't have to re-derive them if earlier "
+            "turns are evicted — or if you come back next session. "
+            "For durable conclusions you want to keep long-term, prefer "
+            "add_belief instead: notes are scratch, beliefs are knowledge."
         ),
         "input_schema": {
             "type": "object",
@@ -194,6 +202,65 @@ TOOLS = [
                 },
             },
             "required": ["note"],
+        },
+    },
+    {
+        "name": "list_notes",
+        "description": (
+            "List all persistent notes from the project-level notes store. "
+            "Returns the notes with their index (0-based), timestamp, and "
+            "text. Use this at the start of a session or when you need to "
+            "recall what you or a previous session wrote down. "
+            "Indexes are stable: use them with update_note and delete_note."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "description": "Max notes to return (default: 50, most recent last)",
+                },
+            },
+        },
+    },
+    {
+        "name": "update_note",
+        "description": (
+            "Replace an existing persistent note at the given index. "
+            "Use list_notes first to find the index. Returns confirmation "
+            "with the new note text."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "index": {
+                    "type": "integer",
+                    "description": "0-based index of the note to replace (from list_notes)",
+                },
+                "note": {
+                    "type": "string",
+                    "description": "The replacement note text",
+                },
+            },
+            "required": ["index", "note"],
+        },
+    },
+    {
+        "name": "delete_note",
+        "description": (
+            "Remove a persistent note at the given index from the notes store. "
+            "Use list_notes first to find the index. Other notes' indexes shift "
+            "down after deletion."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "index": {
+                    "type": "integer",
+                    "description": "0-based index of the note to delete (from list_notes)",
+                },
+            },
+            "required": ["index"],
         },
     },
 ]
@@ -279,6 +346,104 @@ BELIEF_TOOLS = [
 
 
 MAX_READ_LINES = 500
+
+DEFAULT_NOTES_PATH = ".worker-bee/notes.jsonl"
+MAX_PERSISTENT_NOTES = 100  # cap the persisted note history; oldest are rotated out
+
+
+class NoteStore:
+    """Persistent project-level notes store.
+
+    Notes are stored as JSONL (one JSON object per line) in a shared file
+    (default: .worker-bee/notes.jsonl). The same store can be reused across
+    chat rounds and sessions so notes survive beyond a single edit loop.
+
+    Each entry has the shape: {"ts": <iso-timestamp>, "note": <text>}.
+    """
+
+    def __init__(self, path: str | None = DEFAULT_NOTES_PATH,
+                 max_notes: int = MAX_PERSISTENT_NOTES):
+        self.path = Path(path) if path else None
+        self.max_notes = max_notes
+        self._notes: list[dict] = self._load()
+
+    @property
+    def enabled(self) -> bool:
+        return self.path is not None
+
+    def _load(self) -> list[dict]:
+        if not self.path:
+            return []
+        if not self.path.exists():
+            return []
+        notes: list[dict] = []
+        try:
+            with open(self.path, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                        if isinstance(entry, dict) and "note" in entry:
+                            notes.append(entry)
+                    except json.JSONDecodeError:
+                        continue
+        except OSError:
+            return []
+        return notes
+
+    def _flush(self) -> None:
+        if not self.path:
+            return
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.path, "w") as f:
+                for entry in self._notes:
+                    f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except OSError as e:
+            # Persistence is best-effort; in-memory copy still works.
+            print(f"warning: could not persist notes: {e}", file=sys.stderr)
+
+    def list(self) -> list[dict]:
+        return list(self._notes)
+
+    def add(self, note: str) -> int:
+        """Append a note. Returns its index in the store."""
+        if not note or not note.strip():
+            raise ValueError("note text is empty")
+        entry = {
+            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "note": note,
+        }
+        self._notes.append(entry)
+        # Cap the history: rotate out the oldest entries beyond the cap.
+        if self.max_notes and len(self._notes) > self.max_notes:
+            self._notes = self._notes[-self.max_notes:]
+        self._flush()
+        return len(self._notes) - 1
+
+    def get(self, index: int) -> dict:
+        if index < 0 or index >= len(self._notes):
+            raise IndexError(
+                f"note index {index} out of range (0..{len(self._notes) - 1})"
+            )
+        return self._notes[index]
+
+    def update(self, index: int, note: str) -> dict:
+        if not note or not note.strip():
+            raise ValueError("note text is empty")
+        entry = self.get(index)
+        entry["note"] = note
+        entry["ts"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        self._flush()
+        return entry
+
+    def delete(self, index: int) -> int:
+        self.get(index)  # validates range
+        self._notes.pop(index)
+        self._flush()
+        return len(self._notes)
 
 
 class BeliefStore:
@@ -406,8 +571,106 @@ def execute_tool(name: str, tool_input: dict) -> str:
         return _list_blockers()
     elif name == "add_belief":
         return _add_belief(tool_input["id"], tool_input["text"], tool_input.get("source", ""))
+    elif name == "write_note":
+        return _write_note(tool_input.get("note", ""))
+    elif name == "list_notes":
+        return _list_notes(limit=tool_input.get("limit", 50))
+    elif name == "update_note":
+        return _update_note(tool_input.get("index", -1), tool_input.get("note", ""))
+    elif name == "delete_note":
+        return _delete_note(tool_input.get("index", -1))
     else:
         return f"Unknown tool: {name}"
+
+
+# ---------------------------------------------------------------------------
+# Persistent notes
+#
+# A single NoteStore can be active at a time. It's set by the editor/chat
+# layer via set_notes_file() before the loop begins. When None (persistence
+# disabled), the tools fall back to returning a helpful message so the LLM
+# knows the feature is off for this run.
+# ---------------------------------------------------------------------------
+
+_active_notes: NoteStore | None = None
+
+
+def set_notes_file(path: str | None) -> None:
+    """Configure the active notes store.
+
+    path:
+        - a string path (e.g. '.worker-bee/notes.jsonl') enables persistence
+        - None disables persistence (in-memory notes only — tools still work,
+          just don't survive the process)
+    """
+    global _active_notes
+    _active_notes = NoteStore(path=path) if path else None
+
+
+def get_notes_store() -> NoteStore | None:
+    return _active_notes
+
+
+def _write_note(note: str) -> str:
+    if not note or not note.strip():
+        return "Error: note text is empty"
+    if _active_notes is None:
+        # No persistent store configured. Still accept the call — return a
+        # message so the LLM knows persistence is off for this run.
+        return "Note stored in-memory only (no --notes path configured for this session). " \
+               "It will not be visible to future sessions."
+    try:
+        idx = _active_notes.add(note)
+        return f"Note saved. ({idx + 1} total) [persisted to {_active_notes.path}]"
+    except Exception as e:
+        return f"Error writing note: {e}"
+
+
+def _list_notes(limit: int = 50) -> str:
+    if _active_notes is None or not _active_notes.enabled:
+        return "No persistent notes configured for this session."
+    notes = _active_notes.list()
+    if not notes:
+        return "No notes yet."
+    if limit > 0:
+        notes = notes[-limit:]
+        offset = 0  # we keep the original indexes by computing them below
+    # Compute real indexes into the full store so update/delete keep working.
+    full = _active_notes.list()
+    lines = []
+    for i, entry in enumerate(full):
+        if limit > 0 and i < len(full) - limit:
+            continue
+        ts = entry.get("ts", "")
+        lines.append(f"[{i}] {ts}  {entry['note']}")
+    header = f"{len(full)} persistent note(s) in {_active_notes.path}:"
+    return header + "\n" + "\n".join(lines)
+
+
+def _update_note(index: int, note: str) -> str:
+    if _active_notes is None or not _active_notes.enabled:
+        return "Error: no persistent notes store configured for this session"
+    if not note or not note.strip():
+        return "Error: note text is empty"
+    try:
+        entry = _active_notes.update(int(index), note)
+        return f"Updated note [{index}]: {entry['note'][:120]}"
+    except IndexError as e:
+        return f"Error: {e}"
+    except Exception as e:
+        return f"Error updating note: {e}"
+
+
+def _delete_note(index: int) -> str:
+    if _active_notes is None or not _active_notes.enabled:
+        return "Error: no persistent notes store configured for this session"
+    try:
+        remaining = _active_notes.delete(int(index))
+        return f"Deleted note. ({remaining} remaining)"
+    except IndexError as e:
+        return f"Error: {e}"
+    except Exception as e:
+        return f"Error deleting note: {e}"
 
 
 def _read_file(path, offset=None, limit=None):
