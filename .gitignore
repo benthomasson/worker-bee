@@ -6,5 +6,6 @@ build/
 .venv/
 .pytest_cache/
 *.db
+*.db-*
 .worker-bee/
 uv.lock
