@@ -331,6 +331,10 @@ def run_edit_loop(
                 tools=tools,
                 num_ctx=num_ctx,
             )
+        except KeyboardInterrupt:
+            print(f"\n  Interrupted.", file=sys.stderr)
+            _log_event(log, "interrupted", turn=turn)
+            break
         except RuntimeError as e:
             err = str(e)
             print(f"\n  Error: {err}", file=sys.stderr)
@@ -412,9 +416,17 @@ def run_edit_loop(
                 elif choice == "skip":
                     result_text = "(skipped by user)"
                 else:
-                    result_text = execute_tool(block.name, block.input)
+                    try:
+                        result_text = execute_tool(block.name, block.input)
+                    except KeyboardInterrupt:
+                        result_text = "(interrupted by user)"
+                        abort = True
             else:
-                result_text = execute_tool(block.name, block.input)
+                try:
+                    result_text = execute_tool(block.name, block.input)
+                except KeyboardInterrupt:
+                    result_text = "(interrupted by user)"
+                    abort = True
 
             if block.name not in ("list_memory", "retrieve_memory", "write_note",
                                   "list_notes", "update_note", "delete_note",
@@ -442,13 +454,17 @@ def run_edit_loop(
             print(f"\n  Session aborted by user.", file=sys.stderr)
             break
 
-    if not session.completed:
+    if not session.completed and session.turns_used >= max_turns:
         print(f"\n  Reached max turns ({max_turns})", file=sys.stderr)
 
+    _finish_session(log, session)
+    return session
+
+
+def _finish_session(log: dict, session: EditSession) -> None:
     _log_event(log, "session_end",
                turns=session.turns_used, completed=session.completed)
     _print_summary(session)
-    return session
 
 
 def _print_tool_call(block: ToolUseBlock) -> None:
