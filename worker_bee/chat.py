@@ -8,6 +8,7 @@ recall what it learned before.
 
 from __future__ import annotations
 
+import readline  # noqa: F401 — enables line editing and history for input()
 import sys
 from pathlib import Path
 
