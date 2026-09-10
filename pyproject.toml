@@ -14,6 +14,7 @@ dependencies = ["ftl-reasons", "prompt_toolkit"]
 [project.optional-dependencies]
 test = ["pytest", "pytest-cov"]
 ollama = ["httpx>=0.27"]
+openai = ["openai>=1.0"]
 tokens = ["tiktoken>=0.7"]
 
 [project.scripts]

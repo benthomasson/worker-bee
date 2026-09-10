@@ -20,7 +20,7 @@ from worker_bee.tools import (
     set_belief_db,
     set_notes_file,
 )
-from worker_bee.llm import TextBlock, ToolUseBlock
+from worker_bee.llm import TextBlock, ToolUseBlock, format_cost_summary
 
 MAX_TURNS = 20
 
@@ -561,6 +561,9 @@ def _print_summary(session: EditSession) -> None:
     if edits:
         files = sorted(set(s.tool_input.get("path", "?") for s in edits))
         print(f"  Files modified: {', '.join(files)}", file=sys.stderr)
+    cost = format_cost_summary()
+    if cost:
+        print(f"  {cost}", file=sys.stderr)
     if session.log_path:
         print(f"  Log: {session.log_path}", file=sys.stderr)
 

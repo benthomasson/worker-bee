@@ -40,6 +40,13 @@ except ImportError:
     LangfuseCallbackHandler = None
     _HAS_LANGFUSE = False
 
+try:
+    import openai as _openai_mod
+    _HAS_OPENAI = True
+except ImportError:
+    _openai_mod = None
+    _HAS_OPENAI = False
+
 
 MODEL_COMMANDS = {
     "claude": ["claude", "-p", "--output-format", "json"],
@@ -182,7 +189,7 @@ def resolve_model_cmd(model: str) -> list[str]:
     available = (
         list(MODEL_COMMANDS)
         + ["claude:<model>", "gemini:<model>", "ollama:<model>",
-           "api:<model>", "vertex:<model>"]
+           "openai:<model>", "api:<model>", "vertex:<model>"]
     )
     raise ValueError(f"Unknown model: {model}. Available: {available}")
 
@@ -248,6 +255,9 @@ def invoke_model(prompt: str, model: str = "claude", timeout: int = 300) -> str:
     if model.startswith("api:") or model.startswith("vertex:"):
         return _invoke_api(prompt, model, timeout)
 
+    if model.startswith("openai:"):
+        return _invoke_openai(prompt, model, timeout)
+
     if model.startswith("ollama:"):
         return _invoke_ollama(prompt, model, timeout)
 
@@ -270,6 +280,32 @@ def invoke_model(prompt: str, model: str = "claude", timeout: int = 300) -> str:
         raise RuntimeError(f"{model} failed: {result.stderr}")
     output = result.stdout
     return _parse_cli_json(output, model)
+
+
+def _invoke_openai(prompt: str, model: str, timeout: int = 300) -> str:
+    """Invoke an OpenAI model via the Responses API."""
+    if not _HAS_OPENAI:
+        raise ImportError(
+            "openai is required for openai: models. "
+            "Install with: pip install openai"
+        )
+    openai_model = model.split(":", 1)[1]
+    client = _openai_mod.OpenAI()
+    response = client.responses.create(
+        model=openai_model,
+        input=prompt,
+        timeout=timeout,
+    )
+    text = ""
+    for item in response.output:
+        if item.type == "message":
+            for part in item.content:
+                if hasattr(part, "text"):
+                    text += part.text
+    input_tokens = response.usage.input_tokens if response.usage else 0
+    output_tokens = response.usage.output_tokens if response.usage else 0
+    _record_cost(model, input_tokens, output_tokens, 0.0)
+    return text
 
 
 def _invoke_ollama(prompt: str, model: str, timeout: int = 300) -> str:
@@ -356,6 +392,9 @@ def create_provider(model_string):
     if model_string.startswith("ollama:"):
         ollama_model = model_string.split(":", 1)[1]
         return _OllamaProvider(ollama_model)
+    if model_string.startswith("openai:"):
+        openai_model = model_string.split(":", 1)[1]
+        return _OpenAIProvider(openai_model)
     if model_string.startswith("api:"):
         anthropic_model = model_string.split(":", 1)[1]
         return _AnthropicProvider(anthropic_model, use_vertex=False)
@@ -524,4 +563,132 @@ class _OllamaProvider:
             ))
 
         stop_reason = "tool_use" if tool_calls else "end_turn"
+        return ChatResponse(content=content, stop_reason=stop_reason)
+
+
+class _OpenAIProvider:
+    """Wraps the OpenAI Responses API for tool-use conversations."""
+
+    def __init__(self, model):
+        self.model = model
+        if not _HAS_OPENAI:
+            raise ImportError(
+                "openai is required for openai: models. "
+                "Install with: pip install openai"
+            )
+        self.client = _openai_mod.OpenAI()
+
+    def send(self, messages, system, tools, max_tokens=8096, num_ctx=None):
+        input_items = self._convert_messages(messages)
+        openai_tools = self._convert_tools(tools) if tools else None
+
+        kwargs = {
+            "model": self.model,
+            "instructions": system,
+            "input": input_items,
+            "max_output_tokens": max_tokens,
+        }
+        if openai_tools:
+            kwargs["tools"] = openai_tools
+
+        response = self.client.responses.create(**kwargs)
+
+        if response.usage:
+            _record_cost(
+                f"openai:{self.model}",
+                response.usage.input_tokens,
+                response.usage.output_tokens,
+                0.0,
+            )
+
+        return self._parse_response(response)
+
+    def _convert_messages(self, messages):
+        """Convert Anthropic-format message history to Responses API input items."""
+        items = []
+
+        for msg in messages:
+            role = msg["role"]
+            content = msg["content"]
+
+            if role == "user" and isinstance(content, str):
+                items.append({"role": "user", "content": content})
+
+            elif role == "user" and isinstance(content, list):
+                for item in content:
+                    if isinstance(item, dict) and item.get("type") == "tool_result":
+                        items.append({
+                            "type": "function_call_output",
+                            "call_id": item.get("tool_use_id", ""),
+                            "output": item.get("content", ""),
+                        })
+
+            elif role == "assistant":
+                if isinstance(content, str):
+                    items.append({
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": content}],
+                    })
+                elif isinstance(content, list):
+                    text_parts = []
+                    for block in content:
+                        btype = getattr(block, "type", None) or (block.get("type") if isinstance(block, dict) else None)
+                        if btype == "text":
+                            text = getattr(block, "text", "") if not isinstance(block, dict) else block.get("text", "")
+                            text_parts.append(text)
+                        elif btype == "tool_use":
+                            name = getattr(block, "name", None) if not isinstance(block, dict) else block.get("name")
+                            inp = getattr(block, "input", {}) if not isinstance(block, dict) else block.get("input", {})
+                            block_id = getattr(block, "id", None) if not isinstance(block, dict) else block.get("id")
+                            items.append({
+                                "type": "function_call",
+                                "call_id": block_id or f"call_{len(items)}",
+                                "name": name,
+                                "arguments": json.dumps(inp) if isinstance(inp, dict) else inp,
+                            })
+                    if text_parts:
+                        combined = "\n".join(text_parts)
+                        if combined.strip():
+                            items.append({
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [{"type": "output_text", "text": combined}],
+                            })
+
+        return items
+
+    def _convert_tools(self, tools):
+        """Convert Anthropic tool schemas to Responses API format."""
+        return [
+            {
+                "type": "function",
+                "name": t["name"],
+                "description": t["description"],
+                "parameters": t["input_schema"],
+            }
+            for t in tools
+        ]
+
+    def _parse_response(self, response):
+        """Convert Responses API response to a ChatResponse."""
+        content = []
+
+        for item in response.output:
+            if item.type == "message":
+                for part in item.content:
+                    if hasattr(part, "text") and part.text:
+                        content.append(TextBlock(text=part.text))
+            elif item.type == "function_call":
+                args = item.arguments
+                if isinstance(args, str):
+                    args = json.loads(args)
+                content.append(ToolUseBlock(
+                    id=item.call_id,
+                    name=item.name,
+                    input=args,
+                ))
+
+        has_tool_calls = any(item.type == "function_call" for item in response.output)
+        stop_reason = "tool_use" if has_tool_calls else "end_turn"
         return ChatResponse(content=content, stop_reason=stop_reason)

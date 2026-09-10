@@ -18,7 +18,7 @@ def main(argv: list[str] | None = None) -> int:
 
     sub_review = subparsers.add_parser("review", help="Review unreviewed beliefs against source documents")
     sub_review.add_argument("db", help="Path to reasons.db")
-    sub_review.add_argument("--model", default="ollama:qwen3.8:27b", help="Model to use (e.g. ollama:qwen3.8:27b, claude, api:claude-sonnet-4-20250514)")
+    sub_review.add_argument("--model", default="ollama:qwen3.8:27b", help="Model to use (e.g. ollama:qwen3.8:27b, openai:gpt-4o, api:claude-sonnet-4-20250514)")
     sub_review.add_argument("--batch-size", type=int, default=5, help="Beliefs per LLM call (default: 5)")
     sub_review.add_argument("--limit", type=int, default=None, help="Max beliefs to review")
     sub_review.add_argument("--dry-run", action="store_true", help="Print prompts without dispatching")
@@ -101,7 +101,7 @@ def main(argv: list[str] | None = None) -> int:
 
     sub_run = subparsers.add_parser("run", help="Run the full pipeline on a belief database")
     sub_run.add_argument("db", help="Path to reasons.db")
-    sub_run.add_argument("--model", default="ollama:qwen3.8:27b", help="Model to use (e.g. ollama:qwen3.8:27b, claude, api:claude-sonnet-4-20250514)")
+    sub_run.add_argument("--model", default="ollama:qwen3.8:27b", help="Model to use (e.g. ollama:qwen3.8:27b, openai:gpt-4o, api:claude-sonnet-4-20250514)")
     sub_run.add_argument("--dry-run", action="store_true", help="Print prompts without dispatching")
 
     args = parser.parse_args(argv)
