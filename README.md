@@ -1,4 +1,4 @@
-# worker-bee
+# worker-bee 🐝
 
 Belief-driven orchestrator for small-context worker bees.
 
