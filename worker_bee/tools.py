@@ -853,6 +853,57 @@ def _glob(pattern, path):
     return "\n".join(sorted(filtered))
 
 
+def _validate_special_command(argv):
+    """Reject command-specific escape hatches not covered by path checks."""
+    executable = Path(argv[0]).name
+    args = argv[1:]
+
+    if executable == "find":
+        dangerous = {"-exec", "-execdir", "-ok", "-okdir"}
+        if any(arg in dangerous or any(arg.startswith(option + ",") for option in dangerous)
+               for arg in args):
+            return "Error: find execution actions are not allowed"
+
+    if executable == "git":
+        # Keep git read-only.  In particular, clone has a destination argument
+        # and several other options which can launch helpers or write elsewhere.
+        subcommand = next((arg for arg in args if not arg.startswith("-")), None)
+        allowed = {"branch", "diff", "grep", "log", "ls-files", "rev-parse", "show", "status"}
+        if subcommand not in allowed:
+            return f"Error: git subcommand is not allowed: {subcommand or '(missing)'}"
+        if any(arg in {"--upload-pack", "--receive-pack", "--exec-path"}
+               or arg.startswith(("--upload-pack=", "--receive-pack=", "--exec-path="))
+               for arg in args):
+            return "Error: git helper options are not allowed"
+
+    if executable == "uv":
+        # uv run/tool can execute an arbitrary program.  uv's environment
+        # selectors and cache/output locations must not point outside the root.
+        if args and args[0] in {"run", "tool"}:
+            return "Error: uv arbitrary program execution is not allowed"
+        if any(arg == "--system" for arg in args):
+            return "Error: uv system-wide writes are not allowed"
+        forbidden = {"--python", "--python-preference", "--cache-dir"}
+        if any(arg in forbidden or any(arg.startswith(option + "=") for option in forbidden)
+               for arg in args):
+            return "Error: uv interpreter/cache options are not allowed"
+        for index, arg in enumerate(args):
+            if arg in {"--target", "--prefix"}:
+                if index + 1 >= len(args):
+                    return f"Error: {arg} requires a workspace path"
+                try:
+                    _workspace_path(args[index + 1])
+                except ValueError as e:
+                    return f"Error: uv write target is outside workspace: {e}"
+            elif arg.startswith(("--target=", "--prefix=")):
+                try:
+                    _workspace_path(arg.split("=", 1)[1])
+                except ValueError as e:
+                    return f"Error: uv write target is outside workspace: {e}"
+
+    return None
+
+
 def _run_command(command):
     try:
         argv = shlex.split(command)
@@ -866,6 +917,10 @@ def _run_command(command):
     executable = Path(argv[0]).name
     if executable not in _ALLOWED_COMMANDS or argv[0] != executable:
         return f"Error: command not allowlisted: {argv[0]}"
+
+    special_error = _validate_special_command(argv)
+    if special_error:
+        return special_error
 
     # Do not let command arguments turn a confined process into an escape hatch.
     # Validate directory options and the positional path arguments of commands

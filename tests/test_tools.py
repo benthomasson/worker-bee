@@ -34,6 +34,35 @@ def test_run_command_rejects_paths_outside_workspace(tmp_path):
     assert "outside workspace" in result
 
 
+def test_powerful_allowlisted_commands_are_restricted(tmp_path):
+    tools.set_workspace_root(tmp_path)
+
+    clone = tools.execute_tool("run_command", {
+        "command": "git clone https://example.invalid/repo.git ../checkout",
+    })
+    target = tools.execute_tool("run_command", {
+        "command": "uv pip install --target ../packages example",
+    })
+    execute = tools.execute_tool("run_command", {
+        "command": "find . -name '*.txt' -exec cat {} +",
+    })
+
+    assert "git subcommand is not allowed" in clone
+    assert "uv write target is outside workspace" in target
+    assert "find execution actions are not allowed" in execute
+
+
+def test_allowlisted_read_only_commands_remain_available(tmp_path):
+    tools.set_workspace_root(tmp_path)
+    (tmp_path / "file.txt").write_text("hello")
+
+    git_result = tools.execute_tool("run_command", {"command": "git status"})
+    assert "git subcommand is not allowed" not in git_result
+    assert "file.txt" in tools.execute_tool(
+        "run_command", {"command": "find . -name '*.txt'"}
+    )
+
+
 def test_workspace_symlink_cannot_escape(tmp_path):
     tools.set_workspace_root(tmp_path)
     outside = tmp_path.parent / "real.txt"
