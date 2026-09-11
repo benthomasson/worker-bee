@@ -83,6 +83,7 @@ def fix_belief(
         brain_path=brain_path,
         truncate_chars=truncate_chars,
         ctx_limit_pct=ctx_limit_pct,
+        workspace_root=project_dir,
     )
 
 

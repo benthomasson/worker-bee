@@ -19,6 +19,7 @@ from worker_bee.tools import (
     execute_tool,
     set_belief_db,
     set_notes_file,
+    set_workspace_root,
 )
 from worker_bee.llm import TextBlock, ToolUseBlock, format_cost_summary
 
@@ -249,6 +250,7 @@ def run_edit_loop(
     ctx_limit_pct: float = 0.80,
     chat_mode: bool = False,
     allow_questions: bool = True,
+    workspace_root: str | Path | None = None,
 ) -> EditSession:
     """Run a multi-turn code-editing conversation with tool use.
 
@@ -256,6 +258,7 @@ def run_edit_loop(
     when evicting old messages from the context window.
     """
     session = EditSession(task=task, model=model)
+    set_workspace_root(workspace_root)
     notes_store = NoteStore(path=DEFAULT_NOTES_PATH)
     set_notes_file(DEFAULT_NOTES_PATH)
     memory = SessionMemory(notes_store=notes_store)

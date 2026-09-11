@@ -23,8 +23,5 @@ worker-bee = "worker_bee.cli:main"
 [tool.setuptools]
 packages = ["worker_bee"]
 
-[tool.uv.sources]
-ftl-reasons = { path = "../ftl-reasons" }
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]

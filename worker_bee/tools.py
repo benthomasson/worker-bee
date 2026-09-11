@@ -11,6 +11,7 @@ import glob as glob_module
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -136,15 +137,16 @@ TOOLS = [
     {
         "name": "run_command",
         "description": (
-            "Run a shell command and return its output. "
-            "Use for running tests, git operations, etc."
+            "Run an approved command in the workspace and return its output. "
+            "Commands run without a shell; shell operators, pipelines, and "
+            "redirections are not supported. Quote arguments with standard shell quoting."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "The shell command to run",
+                    "description": "The command and arguments to run (no shell syntax)",
                 }
             },
             "required": ["command"],
@@ -548,6 +550,40 @@ class BeliefStore:
 
 _belief_store = BeliefStore()
 
+# Tool execution is deliberately confined to the project workspace.  Commands
+# are also run without a shell and must use an approved executable.
+_workspace_root = Path.cwd().resolve()
+_ALLOWED_COMMANDS = frozenset({
+    "cat", "find", "git", "grep", "ls", "python", "pytest", "pwd", "ruff", "uv",
+})
+
+
+def set_workspace_root(path: str | os.PathLike[str] | None) -> None:
+    """Set the root directory visible to filesystem and command tools.
+
+    All filesystem paths are resolved beneath this directory.  ``None`` uses
+    the current working directory.  Symlinks are resolved before the boundary
+    check so a link cannot escape the workspace.
+    """
+    global _workspace_root
+    root = Path.cwd() if path is None else Path(path)
+    _workspace_root = root.expanduser().resolve()
+    if not _workspace_root.is_dir():
+        raise ValueError(f"workspace root is not a directory: {path}")
+
+
+def _workspace_path(path: str | os.PathLike[str]) -> Path:
+    candidate = Path(path)
+    if candidate.is_absolute():
+        resolved = candidate.expanduser().resolve()
+    else:
+        resolved = (_workspace_root / candidate).resolve()
+    try:
+        resolved.relative_to(_workspace_root)
+    except ValueError as exc:
+        raise ValueError(f"path is outside workspace: {path}") from exc
+    return resolved
+
 
 def set_belief_db(db_path: str | None, brain_path: str | None = None) -> None:
     """Configure the belief store.
@@ -695,6 +731,7 @@ def _delete_note(index: int) -> str:
 
 def _read_file(path, offset=None, limit=None):
     try:
+        path = _workspace_path(path)
         with open(path, "r") as f:
             lines = f.readlines()
     except Exception as e:
@@ -723,7 +760,8 @@ def _read_file(path, offset=None, limit=None):
 
 def _write_file(path, content):
     try:
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        path = _workspace_path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w") as f:
             f.write(content)
         return f"Successfully wrote to {path}"
@@ -733,6 +771,7 @@ def _write_file(path, content):
 
 def _edit_file(path, old_string, new_string):
     try:
+        path = _workspace_path(path)
         with open(path, "r") as f:
             content = f.read()
 
@@ -752,6 +791,7 @@ def _edit_file(path, old_string, new_string):
 
 def _grep(pattern, path):
     try:
+        path = _workspace_path(path)
         regex = re.compile(pattern)
     except re.error as e:
         return f"Invalid regex: {e}"
@@ -776,15 +816,36 @@ def _grep(pattern, path):
 
 
 def _glob(pattern, path):
-    full_pattern = os.path.join(path, pattern)
+    # Do not let glob's own path semantics bypass the workspace boundary:
+    # os.path.join() discards its first argument for an absolute second
+    # argument, and a pattern containing ``..`` can walk back above it.
+    if not isinstance(pattern, str) or not pattern:
+        return "Error: glob pattern must be a non-empty string"
+    if os.path.isabs(pattern):
+        return "Error: glob pattern must be relative to the workspace"
+    if any(component == ".." for component in Path(pattern).parts):
+        return "Error: glob pattern cannot contain '..'"
+
+    try:
+        path = _workspace_path(path)
+    except ValueError as e:
+        return f"Error: {e}"
+    full_pattern = os.path.join(str(path), pattern)
     matches = glob_module.glob(full_pattern, recursive=True)
     skip = {".git", ".venv", "node_modules", "__pycache__", "target"}
     filtered = []
     for m in matches:
-        parts = m.split(os.sep)
+        parts = Path(m).parts
         if any(p in skip or (p.startswith(".") and p != ".") for p in parts):
             continue
-        if os.path.isfile(m):
+        # glob follows directory symlinks and can return a symlink to a file
+        # outside the workspace. Resolve every match before exposing it.
+        try:
+            resolved = Path(m).resolve()
+            resolved.relative_to(_workspace_root)
+        except (OSError, ValueError):
+            continue
+        if resolved.is_file():
             filtered.append(os.path.relpath(m, path))
 
     if not filtered:
@@ -794,8 +855,54 @@ def _glob(pattern, path):
 
 def _run_command(command):
     try:
+        argv = shlex.split(command)
+    except ValueError as e:
+        return f"Error: invalid command quoting: {e}"
+    if not argv:
+        return "Error: command is empty"
+    if any(token in {";", "&&", "||", "|", ">", ">>", "<", "&"} for token in argv):
+        return "Error: shell syntax is not supported"
+
+    executable = Path(argv[0]).name
+    if executable not in _ALLOWED_COMMANDS or argv[0] != executable:
+        return f"Error: command not allowlisted: {argv[0]}"
+
+    # Do not let command arguments turn a confined process into an escape hatch.
+    # Validate directory options and the positional path arguments of commands
+    # that can read or execute files.  Resolution also rejects symlinks leaving
+    # the workspace.
+    path_options = {"-C", "--directory", "--cwd", "--work-tree", "--git-dir"}
+    path_args = set()
+    if executable in {"cat", "find", "ls", "pytest", "ruff"}:
+        path_args = {i for i, arg in enumerate(argv[1:], 1) if not arg.startswith("-")}
+    elif executable == "grep":
+        non_options = [i for i, arg in enumerate(argv[1:], 1) if not arg.startswith("-")]
+        path_args = set(non_options[1:])  # first non-option is the pattern
+    elif executable == "python":
+        if "-c" in argv or "-m" in argv or "-" in argv:
+            return "Error: inline/module Python execution is not allowed"
+        path_args = {i for i, arg in enumerate(argv[1:], 1) if not arg.startswith("-")}
+
+    for index, arg in enumerate(argv[1:], 1):
+        value = None
+        if arg.startswith(("/", "../", "./", "~")):
+            value = arg
+        elif arg in path_options and index + 1 < len(argv):
+            value = argv[index + 1]
+        elif any(arg.startswith(option + "=") for option in path_options):
+            value = arg.split("=", 1)[1]
+        elif index in path_args:
+            value = arg
+        if value is not None:
+            try:
+                _workspace_path(value)
+            except ValueError as e:
+                return f"Error: command path is outside workspace: {e}"
+
+    try:
         result = subprocess.run(
-            command, shell=True, capture_output=True, text=True, timeout=30,
+            argv, cwd=_workspace_root, shell=False,
+            capture_output=True, text=True, timeout=30,
         )
         output = result.stdout
         if result.stderr:
