@@ -865,21 +865,63 @@ def _validate_special_command(argv):
             return "Error: find execution actions are not allowed"
 
     if executable == "git":
-        # Keep git read-only.  In particular, clone has a destination argument
-        # and several other options which can launch helpers or write elsewhere.
+        # Permit the small set of repository operations needed by the worker
+        # (including staging and committing its own changes).  Network,
+        # checkout, config, and other operations that can alter or escape the
+        # workspace remain rejected.
         subcommand = next((arg for arg in args if not arg.startswith("-")), None)
-        allowed = {"branch", "diff", "grep", "log", "ls-files", "rev-parse", "show", "status"}
-        if subcommand not in allowed:
+        read_only = {"branch", "diff", "grep", "log", "ls-files", "rev-parse", "show", "status"}
+        if subcommand == "add":
+            add_args = [arg for arg in args[1:] if not arg.startswith("-")]
+            if not add_args:
+                return "Error: git add requires workspace paths"
+            for value in add_args:
+                try:
+                    _workspace_path(value)
+                except ValueError as e:
+                    return f"Error: git path is outside workspace: {e}"
+        elif subcommand == "commit":
+            # Do not permit hooks/config overrides or commits without an
+            # explicit message.  The commit itself is confined to this repo.
+            forbidden = {"--amend", "--no-verify", "--gpg-sign", "--signoff", "--author"}
+            if any(arg in forbidden or arg.startswith("--author=") for arg in args):
+                return "Error: git commit option is not allowed"
+            if "-m" not in args and not any(arg.startswith("--message=") for arg in args):
+                return "Error: git commit requires an explicit message"
+        elif subcommand not in read_only:
             return f"Error: git subcommand is not allowed: {subcommand or '(missing)'}"
-        if any(arg in {"--upload-pack", "--receive-pack", "--exec-path"}
-               or arg.startswith(("--upload-pack=", "--receive-pack=", "--exec-path="))
+        if any(arg in {"--upload-pack", "--receive-pack", "--exec-path", "--config-env"}
+               or arg.startswith(("--upload-pack=", "--receive-pack=", "--exec-path=", "--config-env="))
                for arg in args):
             return "Error: git helper options are not allowed"
 
     if executable == "uv":
         # uv run/tool can execute an arbitrary program.  uv's environment
         # selectors and cache/output locations must not point outside the root.
-        if args and args[0] in {"run", "tool"}:
+        if args and args[0] == "run":
+            # Permit the project's test runner, but do not turn uv into a
+            # general arbitrary-program launcher.  pytest itself may execute
+            # test code, so this is an intentional, narrowly scoped exception.
+            if len(args) < 2 or args[1] != "pytest":
+                return "Error: uv arbitrary program execution is not allowed"
+            # Keep pytest's file/config roots confined as well; these options
+            # are interpreted by the nested pytest process rather than uv.
+            pytest_args = args[2:]
+            path_options = {"--rootdir", "--confcutdir", "--basetemp"}
+            for index, arg in enumerate(pytest_args):
+                value = None
+                if arg in path_options and index + 1 < len(pytest_args):
+                    value = pytest_args[index + 1]
+                elif any(arg.startswith(option + "=") for option in path_options):
+                    value = arg.split("=", 1)[1]
+                elif not arg.startswith("-"):
+                    value = arg
+                if value is not None:
+                    try:
+                        _workspace_path(value)
+                    except ValueError as e:
+                        return f"Error: pytest path is outside workspace: {e}"
+        elif args and args[0] == "tool":
             return "Error: uv arbitrary program execution is not allowed"
         if any(arg == "--system" for arg in args):
             return "Error: uv system-wide writes are not allowed"

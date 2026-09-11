@@ -63,6 +63,44 @@ def test_allowlisted_read_only_commands_remain_available(tmp_path):
     )
 
 
+def test_git_add_and_commit_are_allowed_safely(tmp_path):
+    tools.set_workspace_root(tmp_path)
+    (tmp_path / "file.txt").write_text("hello")
+
+    add_result = tools.execute_tool("run_command", {"command": "git add file.txt"})
+    commit_result = tools.execute_tool(
+        "run_command", {"command": "git commit -m 'test commit'"}
+    )
+
+    assert "git subcommand is not allowed" not in add_result
+    assert "git subcommand is not allowed" not in commit_result
+
+
+def test_git_commit_escape_options_are_rejected(tmp_path):
+    tools.set_workspace_root(tmp_path)
+
+    assert "git commit option is not allowed" in tools.execute_tool(
+        "run_command", {"command": "git commit --no-verify -m bad"}
+    )
+    assert "requires an explicit message" in tools.execute_tool(
+        "run_command", {"command": "git commit"}
+    )
+
+
+def test_uv_run_pytest_is_allowed_but_arbitrary_uv_run_is_not(tmp_path):
+    tools.set_workspace_root(tmp_path)
+
+    pytest_result = tools.execute_tool(
+        "run_command", {"command": "uv run pytest -q"}
+    )
+    arbitrary_result = tools.execute_tool(
+        "run_command", {"command": "uv run python -c 'print(1)'"}
+    )
+
+    assert "arbitrary program execution is not allowed" not in pytest_result
+    assert "arbitrary program execution is not allowed" in arbitrary_result
+
+
 def test_workspace_symlink_cannot_escape(tmp_path):
     tools.set_workspace_root(tmp_path)
     outside = tmp_path.parent / "real.txt"
