@@ -460,6 +460,17 @@ class _OllamaProvider:
     and the OpenAI-compatible format that Ollama expects.
     """
 
+    # Ollama requires at least one user message inside the context window
+    # and evicts from the OLDEST end first. Tool-result loops produce
+    # histories with no plain user text, so we sprinkle empty "keeper"
+    # user messages throughout the list (not just at the front — a single
+    # front keeper is the first message eviction removes). A keeper is
+    # only ever inserted immediately before an assistant message, which
+    # keeps it out of the assistant(tool_calls) -> tool pairing and never
+    # changes which message is last.
+    KEEPER_MAX_GAP = 10
+    KEEPER_TEXT = " "
+
     def __init__(self, model, base_url=None):
         self.model = model
         self.base_url = base_url or os.environ.get("OLLAMA_HOST", "http://localhost:11434")
@@ -551,7 +562,31 @@ class _OllamaProvider:
                         assistant_msg["tool_calls"] = tool_calls
                     converted.append(assistant_msg)
 
-        return converted
+        return self._sprinkle_keepers(converted)
+
+    def _sprinkle_keepers(self, converted):
+        """Guarantee plain user messages survive Ollama's oldest-first eviction.
+
+        Walks the converted list (system message excluded) and inserts a
+        blank user "keeper" message whenever a run of non-user messages
+        reaches KEEPER_MAX_GAP, placing it immediately before the next
+        assistant message so assistant/tool pairing is preserved.
+        """
+        result = [converted[0]]  # system message, always first
+        non_user_run = 0
+        for msg in converted[1:]:
+            if msg["role"] == "user":
+                # A real user message: keep it and reset the gap counter.
+                result.append(msg)
+                non_user_run = 0
+            elif msg["role"] == "assistant" and non_user_run >= self.KEEPER_MAX_GAP:
+                result.append({"role": "user", "content": self.KEEPER_TEXT})
+                non_user_run = 0
+                result.append(msg)
+            else:
+                result.append(msg)
+                non_user_run += 1
+        return result
 
     def _convert_tools(self, tools):
         """Convert Anthropic tool schemas to OpenAI/Ollama format."""
