@@ -9,6 +9,7 @@ recall what it learned before.
 from __future__ import annotations
 
 import sys
+import time
 
 from prompt_toolkit import prompt as pt_prompt
 from prompt_toolkit.history import FileHistory
@@ -102,6 +103,7 @@ def run_chat(
             break
 
         round_num += 1
+        round_started = time.monotonic()
         print(f"\n--- Round {round_num} ---", file=sys.stderr)
 
         try:
@@ -124,4 +126,5 @@ def run_chat(
         except KeyboardInterrupt:
             print("\n  Interrupted.", file=sys.stderr)
 
+        print(f"  Round duration: {time.monotonic() - round_started:.2f}s", file=sys.stderr)
         print(file=sys.stderr)

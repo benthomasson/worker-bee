@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -119,6 +120,8 @@ class EditSession:
     steps: list[EditStep] = field(default_factory=list)
     turns_used: int = 0
     completed: bool = False
+    turn_durations: list[float] = field(default_factory=list)
+    duration_seconds: float = 0.0
     log_path: str | None = None
 
 
@@ -258,6 +261,7 @@ def run_edit_loop(
     when evicting old messages from the context window.
     """
     session = EditSession(task=task, model=model)
+    session_started = time.monotonic()
     set_workspace_root(workspace_root)
     notes_store = NoteStore(path=DEFAULT_NOTES_PATH)
     set_notes_file(DEFAULT_NOTES_PATH)
@@ -312,6 +316,7 @@ def run_edit_loop(
 
     for turn in range(1, max_turns + 1):
         session.turns_used = turn
+        turn_started = time.monotonic()
         print(f"\n--- Turn {turn}/{max_turns} ---", file=sys.stderr)
 
         messages_tokens = _estimate_tokens(messages)
@@ -323,6 +328,7 @@ def run_edit_loop(
             if ctx_warn_threshold and total_est > ctx_warn_threshold:
                 print(f"  Context {total_est}/{ctx_limit} tokens — stopping to avoid overflow.", file=sys.stderr)
                 _log_event(log, "context_limit", turn=turn, estimated_tokens=total_est, limit=ctx_limit)
+                _print_turn_duration(turn_started, session)
                 break
             elif not verbose:
                 print(f"  Context: ~{total_est} tokens ({total_est * 100 // ctx_limit}%)", file=sys.stderr)
@@ -338,6 +344,7 @@ def run_edit_loop(
         except KeyboardInterrupt:
             print(f"\n  Interrupted.", file=sys.stderr)
             _log_event(log, "interrupted", turn=turn)
+            _print_turn_duration(turn_started, session)
             break
         except RuntimeError as e:
             err = str(e)
@@ -345,6 +352,7 @@ def run_edit_loop(
             _log_event(log, "error", turn=turn, error=err)
             if "no user query" in err.lower() or "context" in err.lower():
                 print("  Context window likely exhausted.", file=sys.stderr)
+            _print_turn_duration(turn_started, session)
             break
 
         assistant_content = []
@@ -383,6 +391,7 @@ def run_edit_loop(
         if response.stop_reason != "tool_use":
             print(f"\n  Model finished (stop_reason: {response.stop_reason})", file=sys.stderr)
             session.completed = True
+            _print_turn_duration(turn_started, session)
             break
 
         tool_results = []
@@ -456,18 +465,29 @@ def run_edit_loop(
 
         if abort:
             print(f"\n  Session aborted by user.", file=sys.stderr)
+            _print_turn_duration(turn_started, session)
             break
+
+        _print_turn_duration(turn_started, session)
 
     if not session.completed and session.turns_used >= max_turns:
         print(f"\n  Reached max turns ({max_turns})", file=sys.stderr)
 
+    session.duration_seconds = time.monotonic() - session_started
     _finish_session(log, session)
     return session
 
 
+def _print_turn_duration(turn_started: float, session: EditSession) -> None:
+    duration = time.monotonic() - turn_started
+    session.turn_durations.append(duration)
+    print(f"  Turn duration: {duration:.2f}s", file=sys.stderr)
+
+
 def _finish_session(log: dict, session: EditSession) -> None:
     _log_event(log, "session_end",
-               turns=session.turns_used, completed=session.completed)
+               turns=session.turns_used, completed=session.completed,
+               duration_seconds=session.duration_seconds)
     _print_summary(session)
 
 
@@ -561,6 +581,7 @@ def _print_summary(session: EditSession) -> None:
     print(f"Session summary: {session.turns_used} turns, "
           f"{len(reads)} reads, {len(edits)} edits, {len(commands)} commands",
           file=sys.stderr)
+    print(f"  Session duration: {session.duration_seconds:.2f}s", file=sys.stderr)
     if edits:
         files = sorted(set(s.tool_input.get("path", "?") for s in edits))
         print(f"  Files modified: {', '.join(files)}", file=sys.stderr)
