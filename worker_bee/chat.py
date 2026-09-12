@@ -71,6 +71,7 @@ def run_chat(
     truncate_chars: int | None = None,
     ctx_limit_pct: float = 0.80,
     allow_questions: bool = True,
+    read_only_paths: list[str] | None = None,
 ) -> None:
     """Run an interactive chat loop."""
     print("worker-bee chat (type 'exit' or Ctrl-D to quit)", file=sys.stderr)
@@ -79,6 +80,8 @@ def run_chat(
     if brain_path:
         print(f"  brain: {brain_path}", file=sys.stderr)
     print(f"  notes: .worker-bee/notes.jsonl", file=sys.stderr)
+    for root in read_only_paths or []:
+        print(f"  read-only: {root}", file=sys.stderr)
     print(f"  model: {model}", file=sys.stderr)
     print(f"  context: {num_ctx} tokens", file=sys.stderr)
     print(file=sys.stderr)
@@ -107,6 +110,9 @@ def run_chat(
         print(f"\n--- Round {round_num} ---", file=sys.stderr)
 
         try:
+            # run_edit_loop validates read_only_paths against the workspace
+            # and raises ValueError on bad input — that propagates to the
+            # CLI's error handler.
             run_edit_loop(
                 task,
                 model=model,
@@ -122,9 +128,13 @@ def run_chat(
                 ctx_limit_pct=ctx_limit_pct,
                 chat_mode=True,
                 allow_questions=allow_questions,
+                read_only_paths=read_only_paths,
             )
         except KeyboardInterrupt:
             print("\n  Interrupted.", file=sys.stderr)
+        except ValueError as e:
+            # e.g. a bad --read-only path; keep the REPL usable.
+            print(f"Error: {e}", file=sys.stderr)
 
         print(f"  Round duration: {time.monotonic() - round_started:.2f}s", file=sys.stderr)
         print(file=sys.stderr)

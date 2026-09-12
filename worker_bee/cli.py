@@ -52,6 +52,9 @@ def main(argv: list[str] | None = None) -> int:
     sub_fix.add_argument("--brain", default=None, help="Path to local brain reasons.db (read/write, layered over --db as hive)")
     sub_fix.add_argument("--truncate-chars", type=int, default=None, help="Truncate assistant output to N chars on stderr (default: no truncation)")
     sub_fix.add_argument("--ctx-limit-pct", type=float, default=0.80, help="Stop at this fraction of context window (0 to disable, default: 0.80)")
+    sub_fix.add_argument("--read-only", action="append", default=[], metavar="DIR",
+                         help="Grant READ-ONLY access to a directory outside the project "
+                              "(repeatable; read_file/grep/glob only — writes stay in the project)")
 
     sub_edit = subparsers.add_parser("edit", help="Run a code-editing loop with tool use")
     sub_edit.add_argument("task", help="Description of the editing task")
@@ -65,6 +68,9 @@ def main(argv: list[str] | None = None) -> int:
     sub_edit.add_argument("--brain", default=None, help="Path to local brain reasons.db (read/write, layered over --db as hive)")
     sub_edit.add_argument("--truncate-chars", type=int, default=None, help="Truncate assistant output to N chars on stderr (default: no truncation)")
     sub_edit.add_argument("--ctx-limit-pct", type=float, default=0.80, help="Stop at this fraction of context window (0 to disable, default: 0.80)")
+    sub_edit.add_argument("--read-only", action="append", default=[], metavar="DIR",
+                          help="Grant READ-ONLY access to a directory outside the workspace "
+                               "(repeatable; read_file/grep/glob only — writes stay in the workspace)")
 
     sub_prompt = subparsers.add_parser("prompt", help="Run a freeform prompt with tool use")
     sub_prompt.add_argument("task", help="The prompt / task description")
@@ -79,6 +85,9 @@ def main(argv: list[str] | None = None) -> int:
     sub_prompt.add_argument("--brain", default=None, help="Path to local brain reasons.db (read/write, layered over --db as hive)")
     sub_prompt.add_argument("--truncate-chars", type=int, default=None, help="Truncate assistant output to N chars on stderr (default: no truncation)")
     sub_prompt.add_argument("--ctx-limit-pct", type=float, default=0.80, help="Stop at this fraction of context window (0 to disable, default: 0.80)")
+    sub_prompt.add_argument("--read-only", action="append", default=[], metavar="DIR",
+                            help="Grant READ-ONLY access to a directory outside the workspace "
+                                 "(repeatable; read_file/grep/glob only — writes stay in the workspace)")
 
     sub_chat = subparsers.add_parser("chat", help="Interactive chat with a worker bee (fresh context each prompt)")
     sub_chat.add_argument("--db", default=None, help="Path to reasons.db (enables belief query tools)")
@@ -92,6 +101,9 @@ def main(argv: list[str] | None = None) -> int:
     sub_chat.add_argument("--truncate-chars", type=int, default=None, help="Truncate assistant output to N chars on stderr (default: no truncation)")
     sub_chat.add_argument("--ctx-limit-pct", type=float, default=0.80, help="Stop at this fraction of context window (0 to disable, default: 0.80)")
     sub_chat.add_argument("--no-questions", action="store_true", help="Disable the ask_user_question tool")
+    sub_chat.add_argument("--read-only", action="append", default=[], metavar="DIR",
+                          help="Grant READ-ONLY access to a directory outside the workspace "
+                               "(repeatable; read_file/grep/glob only — writes stay in the workspace)")
 
     sub_summarize = subparsers.add_parser("summarize", help="Summarize a session log into an entry")
     sub_summarize.add_argument("log", help="Path to a session log (.jsonl)")
@@ -187,73 +199,93 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "fix":
         from worker_bee.fixer import fix_belief
-        session = fix_belief(
-            args.db,
-            args.belief_id,
-            project_dir=args.project_dir,
-            model=args.model,
-            max_turns=args.max_turns,
-            dry_run=args.dry_run,
-            verbose=args.verbose,
-            confirm=args.confirm,
-            num_ctx=args.num_ctx,
-            brain_path=args.brain,
-            truncate_chars=args.truncate_chars,
-            ctx_limit_pct=args.ctx_limit_pct,
-        )
+        try:
+            session = fix_belief(
+                args.db,
+                args.belief_id,
+                project_dir=args.project_dir,
+                model=args.model,
+                max_turns=args.max_turns,
+                dry_run=args.dry_run,
+                verbose=args.verbose,
+                confirm=args.confirm,
+                num_ctx=args.num_ctx,
+                brain_path=args.brain,
+                truncate_chars=args.truncate_chars,
+                ctx_limit_pct=args.ctx_limit_pct,
+                read_only_paths=args.read_only,
+            )
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 2
         return 0
 
     if args.command == "edit":
         from worker_bee.editor import run_edit_loop
-        session = run_edit_loop(
-            args.task,
-            model=args.model,
-            max_turns=args.max_turns,
-            dry_run=args.dry_run,
-            verbose=args.verbose,
-            confirm=args.confirm,
-            num_ctx=args.num_ctx,
-            db_path=args.db,
-            brain_path=args.brain,
-            truncate_chars=args.truncate_chars,
-            ctx_limit_pct=args.ctx_limit_pct,
-        )
+        try:
+            session = run_edit_loop(
+                args.task,
+                model=args.model,
+                max_turns=args.max_turns,
+                dry_run=args.dry_run,
+                verbose=args.verbose,
+                confirm=args.confirm,
+                num_ctx=args.num_ctx,
+                db_path=args.db,
+                brain_path=args.brain,
+                truncate_chars=args.truncate_chars,
+                ctx_limit_pct=args.ctx_limit_pct,
+                read_only_paths=args.read_only,
+            )
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 2
         return 0
 
     if args.command == "prompt":
         from worker_bee.editor import run_edit_loop, PROMPT_SYSTEM_PREFIX
-        session = run_edit_loop(
-            args.task,
-            model=args.model,
-            max_turns=args.max_turns,
-            dry_run=args.dry_run,
-            verbose=args.verbose,
-            confirm=args.confirm,
-            num_ctx=args.num_ctx,
-            db_path=args.db,
-            brain_path=args.brain,
-            system_prefix=PROMPT_SYSTEM_PREFIX,
-            entry_dir=args.entry_dir,
-            truncate_chars=args.truncate_chars,
-            ctx_limit_pct=args.ctx_limit_pct,
-        )
+        try:
+            session = run_edit_loop(
+                args.task,
+                model=args.model,
+                max_turns=args.max_turns,
+                dry_run=args.dry_run,
+                verbose=args.verbose,
+                confirm=args.confirm,
+                num_ctx=args.num_ctx,
+                db_path=args.db,
+                brain_path=args.brain,
+                system_prefix=PROMPT_SYSTEM_PREFIX,
+                entry_dir=args.entry_dir,
+                truncate_chars=args.truncate_chars,
+                ctx_limit_pct=args.ctx_limit_pct,
+                read_only_paths=args.read_only,
+            )
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 2
         return 0
 
     if args.command == "chat":
         from worker_bee.chat import run_chat
-        run_chat(
-            model=args.model,
-            max_turns=args.max_turns,
-            dry_run=args.dry_run,
-            verbose=args.verbose,
-            confirm=args.confirm,
-            num_ctx=args.num_ctx,
-            db_path=args.db,
-            brain_path=args.brain,
-            truncate_chars=args.truncate_chars,
-            ctx_limit_pct=args.ctx_limit_pct,
-            allow_questions=not args.no_questions,
-        )
+        try:
+            run_chat(
+                model=args.model,
+                max_turns=args.max_turns,
+                dry_run=args.dry_run,
+                verbose=args.verbose,
+                confirm=args.confirm,
+                num_ctx=args.num_ctx,
+                db_path=args.db,
+                brain_path=args.brain,
+                truncate_chars=args.truncate_chars,
+                ctx_limit_pct=args.ctx_limit_pct,
+                allow_questions=not args.no_questions,
+                read_only_paths=args.read_only,
+            )
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 2
         return 0
 
     if args.command == "summarize":

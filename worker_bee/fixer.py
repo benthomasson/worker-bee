@@ -50,6 +50,7 @@ def fix_belief(
     brain_path: str | None = None,
     truncate_chars: int | None = None,
     ctx_limit_pct: float = 0.80,
+    read_only_paths: str | Path | list[str | Path] | None = None,
 ) -> EditSession:
     """Fix a verified issue by running a code-editing loop with full context."""
     db_path = Path(db_path)
@@ -84,6 +85,7 @@ def fix_belief(
         truncate_chars=truncate_chars,
         ctx_limit_pct=ctx_limit_pct,
         workspace_root=project_dir,
+        read_only_paths=read_only_paths,
     )
 
 

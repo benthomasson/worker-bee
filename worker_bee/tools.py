@@ -621,7 +621,14 @@ _belief_store = BeliefStore()
 
 # Tool execution is deliberately confined to the project workspace.  Commands
 # are also run without a shell and must use an approved executable.
+#
+# In addition to the writable workspace, callers may grant READ-ONLY access to
+# other directories (e.g. a dependency's source tree).  Read tools
+# (read_file, grep, glob) resolve paths against the workspace OR any
+# read-only root; write tools (write_file, edit_file) and run_command stay
+# confined to the workspace.
 _workspace_root = Path.cwd().resolve()
+_read_only_roots: list[Path] = []
 _ALLOWED_COMMANDS = frozenset({
     "cat", "cargo", "find", "git", "grep", "ls", "python", "pytest", "pwd",
     "ruff", "uv",
@@ -633,21 +640,75 @@ def set_workspace_root(path: str | os.PathLike[str] | None) -> None:
 
     All filesystem paths are resolved beneath this directory.  ``None`` uses
     the current working directory.  Symlinks are resolved before the boundary
-    check so a link cannot escape the workspace.
+    check so a link cannot escape the workspace.  Resetting the workspace also
+    clears any previously configured read-only paths — they must be re-added
+    with :func:`set_read_only_paths` for each new workspace.
     """
     global _workspace_root
     root = Path.cwd() if path is None else Path(path)
     _workspace_root = root.expanduser().resolve()
     if not _workspace_root.is_dir():
         raise ValueError(f"workspace root is not a directory: {path}")
+    _read_only_roots.clear()
 
 
-def _workspace_path(path: str | os.PathLike[str]) -> Path:
+def set_read_only_paths(paths: str | os.PathLike[str] | list[str | os.PathLike[str]] | None) -> None:
+    """Grant READ-ONLY access to directories outside the workspace.
+
+    Each path must be an existing directory and must not lie inside the
+    workspace (a directory inside the workspace is already fully accessible).
+    Read tools (read_file, grep, glob) accept paths beneath these roots; write
+    tools and run_command remain confined to the workspace.  Pass ``None`` or
+    an empty list to clear all read-only paths.
+    """
+    if paths is None:
+        paths = []
+    elif isinstance(paths, (str, os.PathLike)):
+        paths = [paths]
+    roots: list[Path] = []
+    for entry in paths:
+        root = Path(entry).expanduser()
+        try:
+            resolved = root.resolve()
+        except OSError as exc:
+            raise ValueError(f"read-only path cannot be resolved: {entry}") from exc
+        if not resolved.is_dir():
+            raise ValueError(f"read-only path is not a directory: {entry}")
+        try:
+            resolved.relative_to(_workspace_root)
+        except ValueError:
+            pass  # fine — it is outside the workspace
+        else:
+            raise ValueError(
+                f"read-only path is inside the workspace and does not need "
+                f"to be listed: {entry}"
+            )
+        roots.append(resolved)
+    _read_only_roots.clear()
+    _read_only_roots.extend(roots)
+
+
+def _any_allowed_root(path: Path) -> Path | None:
+    """Return the root (workspace or read-only) containing ``path``, if any."""
+    for root in (_workspace_root, *_read_only_roots):
+        try:
+            path.relative_to(root)
+        except ValueError:
+            continue
+        return root
+    return None
+
+
+def _workspace_path(path: str | os.PathLike[str], *, read_only_allowed: bool = True) -> Path:
     candidate = Path(path)
     if candidate.is_absolute():
         resolved = candidate.expanduser().resolve()
     else:
         resolved = (_workspace_root / candidate).resolve()
+    if read_only_allowed:
+        if _any_allowed_root(resolved) is None:
+            raise ValueError(f"path is outside workspace: {path}")
+        return resolved
     try:
         resolved.relative_to(_workspace_root)
     except ValueError as exc:
@@ -870,7 +931,9 @@ def _atomic_write_text(path, text: str) -> None:
 
 def _write_file(path, content):
     try:
-        path = _workspace_path(path)
+        # Writes stay confined to the workspace; read-only roots are
+        # read-only by design.
+        path = _workspace_path(path, read_only_allowed=False)
         path.parent.mkdir(parents=True, exist_ok=True)
         _atomic_write_text(path, content)
         return f"Successfully wrote to {path}"
@@ -880,7 +943,9 @@ def _write_file(path, content):
 
 def _edit_file(path, old_string, new_string):
     try:
-        path = _workspace_path(path)
+        # Edits stay confined to the workspace; read-only roots are
+        # read-only by design.
+        path = _workspace_path(path, read_only_allowed=False)
         with open(path, "r") as f:
             content = f.read()
 
@@ -900,6 +965,9 @@ def _edit_file(path, old_string, new_string):
 def _grep(pattern, path):
     try:
         path = _workspace_path(path)
+    except ValueError as e:
+        return f"Error: {e}"
+    try:
         regex = re.compile(pattern)
     except re.error as e:
         return f"Invalid regex: {e}"
@@ -947,14 +1015,21 @@ def _glob(pattern, path):
         if any(p in skip or (p.startswith(".") and p != ".") for p in parts):
             continue
         # glob follows directory symlinks and can return a symlink to a file
-        # outside the workspace. Resolve every match before exposing it.
+        # outside the workspace. Resolve every match before exposing it and
+        # keep only files inside the workspace or a read-only root.
         try:
             resolved = Path(m).resolve()
-            resolved.relative_to(_workspace_root)
+            root = _any_allowed_root(resolved)
         except (OSError, ValueError):
             continue
-        if resolved.is_file():
+        if root is None or not resolved.is_file():
+            continue
+        if root == _workspace_root:
             filtered.append(os.path.relpath(m, path))
+        else:
+            # Outside the workspace: expose the absolute path so the bee can
+            # pass it straight back to read_file.
+            filtered.append(str(resolved))
 
     if not filtered:
         return "No files found"
@@ -978,7 +1053,7 @@ def _check_pytest_paths(pytest_args):
             value = arg
         if value is not None:
             try:
-                _workspace_path(value)
+                _workspace_path(value, read_only_allowed=False)
             except ValueError as e:
                 return f"Error: pytest path is outside workspace: {e}"
     return None
@@ -1008,7 +1083,7 @@ def _validate_special_command(argv):
                 return "Error: git add requires workspace paths"
             for value in add_args:
                 try:
-                    _workspace_path(value)
+                    _workspace_path(value, read_only_allowed=False)
                 except ValueError as e:
                     return f"Error: git path is outside workspace: {e}"
         elif subcommand == "commit":
@@ -1063,12 +1138,12 @@ def _validate_special_command(argv):
                 if index + 1 >= len(args):
                     return f"Error: {arg} requires a workspace path"
                 try:
-                    _workspace_path(args[index + 1])
+                    _workspace_path(args[index + 1], read_only_allowed=False)
                 except ValueError as e:
                     return f"Error: uv write target is outside workspace: {e}"
             elif arg.startswith(("--target=", "--prefix=")):
                 try:
-                    _workspace_path(arg.split("=", 1)[1])
+                    _workspace_path(arg.split("=", 1)[1], read_only_allowed=False)
                 except ValueError as e:
                     return f"Error: uv write target is outside workspace: {e}"
 
@@ -1131,7 +1206,7 @@ def _run_command(command):
             value = arg
         if value is not None:
             try:
-                _workspace_path(value)
+                _workspace_path(value, read_only_allowed=False)
             except ValueError as e:
                 return f"Error: command path is outside workspace: {e}"
 

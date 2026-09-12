@@ -20,6 +20,7 @@ from worker_bee.tools import (
     execute_tool,
     set_belief_db,
     set_notes_file,
+    set_read_only_paths,
     set_workspace_root,
 )
 from worker_bee.llm import TextBlock, ToolUseBlock, format_cost_summary
@@ -254,15 +255,21 @@ def run_edit_loop(
     chat_mode: bool = False,
     allow_questions: bool = True,
     workspace_root: str | Path | None = None,
+    read_only_paths: str | Path | list[str | Path] | None = None,
 ) -> EditSession:
     """Run a multi-turn code-editing conversation with tool use.
 
     The task is placed in the system message so Ollama preserves it
     when evicting old messages from the context window.
+
+    ``read_only_paths`` grants read-only access to directories outside the
+    workspace: read_file, grep, and glob may read beneath them, but
+    write_file, edit_file, and run_command stay confined to the workspace.
     """
     session = EditSession(task=task, model=model)
     session_started = time.monotonic()
     set_workspace_root(workspace_root)
+    set_read_only_paths(read_only_paths)
     notes_store = NoteStore(path=DEFAULT_NOTES_PATH)
     set_notes_file(DEFAULT_NOTES_PATH)
     memory = SessionMemory(notes_store=notes_store)
@@ -299,6 +306,10 @@ def run_edit_loop(
     log = _init_log(log_dir or LOG_DIR, task, model, dry_run)
     session.log_path = str(log["path"])
     print(f"Log: {session.log_path}", file=sys.stderr)
+    if read_only_paths:
+        listed = read_only_paths if isinstance(read_only_paths, (list, tuple)) else [read_only_paths]
+        for root in listed:
+            print(f"Read-only: {Path(root).expanduser().resolve()}", file=sys.stderr)
 
     system_tokens = _estimate_tokens(system)
     messages_tokens = _estimate_tokens(messages)
