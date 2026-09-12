@@ -1064,31 +1064,33 @@ def _search_beliefs(query, limit=20):
     if not _belief_store.has_any:
         return "Error: no belief database configured for this session"
     try:
-        import sqlite3
-        all_rows = []
+        from reasons.api import search
         seen_ids = set()
-        pattern = f"%{query}%"
+        all_results = []
         for db_path in _belief_store.db_paths:
-            conn = sqlite3.connect(db_path)
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                "SELECT id, text, truth_value FROM nodes "
-                "WHERE id LIKE ? OR text LIKE ? "
-                "ORDER BY truth_value DESC, id",
-                (pattern, pattern),
-            ).fetchall()
-            conn.close()
-            for r in rows:
-                if r["id"] not in seen_ids:
-                    seen_ids.add(r["id"])
-                    all_rows.append(r)
-        all_rows.sort(key=lambda r: (r["truth_value"] != "IN", r["id"]))
-        all_rows = all_rows[:limit]
-        if not all_rows:
+            raw = search(query, db_path=db_path, format="json", depth=0)
+            if isinstance(raw, str):
+                import json as _json
+                try:
+                    items = _json.loads(raw)
+                except (ValueError, TypeError):
+                    continue
+            else:
+                items = raw
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                nid = item.get("id", "")
+                if nid not in seen_ids:
+                    seen_ids.add(nid)
+                    all_results.append(item)
+        all_results.sort(key=lambda r: (r.get("truth_value") != "IN", r.get("id", "")))
+        all_results = all_results[:limit]
+        if not all_results:
             return f"No beliefs matching '{query}'"
         lines = []
-        for r in all_rows:
-            lines.append(f"[{r['truth_value']}] {r['id']}: {r['text'][:120]}")
+        for r in all_results:
+            lines.append(f"[{r.get('truth_value', '?')}] {r['id']}: {r.get('text', '')[:120]}")
         return "\n".join(lines)
     except Exception as e:
         return f"Error: {e}"

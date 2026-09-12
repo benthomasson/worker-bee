@@ -17,27 +17,25 @@ def extract(db_path: str | Path, *, types: list[str] | None = None) -> list[dict
     if not db_path.exists():
         raise FileNotFoundError(f"Database not found: {db_path}")
 
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
-
     issues: list[dict] = []
     all_types = types or ["gated", "contradiction", "stale", "unreviewed"]
 
     if "gated" in all_types:
-        issues.extend(_find_gated(conn))
+        issues.extend(_find_gated(str(db_path)))
     if "contradiction" in all_types:
-        issues.extend(_find_contradictions(conn))
+        issues.extend(_find_contradictions(str(db_path)))
     if "stale" in all_types:
-        issues.extend(_find_stale(conn))
+        issues.extend(_find_stale(str(db_path)))
     if "unreviewed" in all_types:
-        issues.extend(_find_unreviewed(conn))
+        issues.extend(_find_unreviewed(str(db_path)))
 
-    conn.close()
     return issues
 
 
-def _find_gated(conn: sqlite3.Connection) -> list[dict]:
+def _find_gated(db_path: str) -> list[dict]:
     """Find nodes that are IN but have an OUT antecedent."""
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
     rows = conn.execute("""
         SELECT j.node_id, j.antecedents_json, n.text, n.source
         FROM justifications j
@@ -70,11 +68,14 @@ def _find_gated(conn: sqlite3.Connection) -> list[dict]:
                 "description": f"Node is IN but antecedent(s) {', '.join(out_names)} are OUT",
             })
 
+    conn.close()
     return issues
 
 
-def _find_contradictions(conn: sqlite3.Connection) -> list[dict]:
+def _find_contradictions(db_path: str) -> list[dict]:
     """Find nogoods where all member nodes are still IN."""
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
     rows = conn.execute("SELECT id, nodes_json FROM nogoods").fetchall()
 
     issues = []
@@ -99,11 +100,14 @@ def _find_contradictions(conn: sqlite3.Connection) -> list[dict]:
                 "description": f"Nogood {row['id']}: all {len(members)} members are IN",
             })
 
+    conn.close()
     return issues
 
 
-def _find_stale(conn: sqlite3.Connection) -> list[dict]:
+def _find_stale(db_path: str) -> list[dict]:
     """Find nodes whose source files may have changed since derivation."""
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
     rows = conn.execute("""
         SELECT id, text, source, source_hash, created_at
         FROM nodes
@@ -111,6 +115,7 @@ def _find_stale(conn: sqlite3.Connection) -> list[dict]:
           AND source != ''
           AND created_at != ''
     """).fetchall()
+    conn.close()
 
     issues = []
     for row in rows:
@@ -131,8 +136,10 @@ def _find_stale(conn: sqlite3.Connection) -> list[dict]:
     return issues
 
 
-def _find_unreviewed(conn: sqlite3.Connection) -> list[dict]:
+def _find_unreviewed(db_path: str) -> list[dict]:
     """Find derived nodes that haven't been reviewed."""
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
     rows = conn.execute("""
         SELECT id, text, source
         FROM nodes
@@ -140,6 +147,7 @@ def _find_unreviewed(conn: sqlite3.Connection) -> list[dict]:
           AND created_at != ''
           AND (reviewed_at IS NULL OR reviewed_at = '')
     """).fetchall()
+    conn.close()
 
     return [
         {
