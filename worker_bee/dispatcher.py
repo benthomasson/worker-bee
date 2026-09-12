@@ -72,7 +72,7 @@ def dispatch_batch(
     *,
     model: str = DEFAULT_MODEL,
     timeout: int = 300,
-    max_workers: int = 4,
+    max_workers: int = 1,
     retries: int = 2,
 ) -> list[tuple[dict, Response]]:
     """Dispatch prompts concurrently, retrying failures independently.
