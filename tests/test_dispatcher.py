@@ -45,3 +45,23 @@ def test_batch_rejects_negative_retries():
         assert "non-negative" in str(exc)
     else:
         raise AssertionError("expected ValueError")
+
+
+def test_batch_rejects_non_positive_max_workers():
+    for max_workers in (0, -1):
+        try:
+            dispatch_batch([], max_workers=max_workers)
+        except ValueError as exc:
+            assert "positive integer" in str(exc)
+        else:
+            raise AssertionError("expected ValueError")
+
+
+def test_batch_rejects_non_integer_max_workers():
+    for max_workers in (1.5, "2", True):
+        try:
+            dispatch_batch([], max_workers=max_workers)
+        except ValueError as exc:
+            assert "positive integer" in str(exc)
+        else:
+            raise AssertionError("expected ValueError")

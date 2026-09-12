@@ -82,6 +82,8 @@ def dispatch_batch(
     """
     if retries < 0:
         raise ValueError("retries must be non-negative")
+    if type(max_workers) is not int or max_workers <= 0:
+        raise ValueError("max_workers must be a positive integer")
     if not prompts:
         return []
 
