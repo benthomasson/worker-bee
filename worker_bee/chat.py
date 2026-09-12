@@ -11,9 +11,15 @@ from __future__ import annotations
 import sys
 
 from prompt_toolkit import prompt as pt_prompt
+from prompt_toolkit.history import FileHistory
 from pathlib import Path
 
 from worker_bee.editor import run_edit_loop, PROMPT_SYSTEM_PREFIX
+
+# Prompt history: shared for the whole process (in-session, up/down arrows)
+# and persisted to a file (across sessions). Lives alongside the other
+# .worker-bee state so it is CWD-relative like the notes file.
+HISTORY_PATH = ".worker-bee/prompt_history"
 
 
 CHAT_SYSTEM_PREFIX = """\
@@ -76,10 +82,16 @@ def run_chat(
     print(f"  context: {num_ctx} tokens", file=sys.stderr)
     print(file=sys.stderr)
 
+    # Shared history: the same instance is passed to every prompt() call in
+    # this REPL, so up/down arrows recall earlier prompts within the session.
+    # FileHistory also loads/saves to disk, so history survives across sessions.
+    Path(HISTORY_PATH).parent.mkdir(parents=True, exist_ok=True)
+    history = FileHistory(HISTORY_PATH)
+
     round_num = 0
     while True:
         try:
-            task = pt_prompt("bee> ").strip()
+            task = pt_prompt("bee> ", history=history).strip()
         except (EOFError, KeyboardInterrupt):
             print(file=sys.stderr)
             break
