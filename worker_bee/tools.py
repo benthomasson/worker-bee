@@ -417,6 +417,112 @@ BELIEF_TOOLS = [
             "required": ["id", "text"],
         },
     },
+    {
+        "name": "propose_retraction",
+        "description": (
+            "Propose retracting a hive belief (mark it OUT) WITHOUT changing any "
+            "truth value. Creates a pending proposal in the hive that a human (or "
+            "policy) must accept before the retraction applies. Use this for beliefs "
+            "that live in the read-only hive — retract_belief only works on the local "
+            "brain. Returns the proposal id and the computed cascade impact."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "target_id": {
+                    "type": "string",
+                    "description": "The belief ID to retract (e.g. 'notes-not-persisted-to-disk')",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Why the belief should be retracted (free text)",
+                },
+                "basis": {
+                    "type": "string",
+                    "description": "Evidential basis: 'source-divergence' | 'detected-contradiction' | 'prior-knowledge' (default)",
+                },
+                "evidence": {
+                    "type": "string",
+                    "description": "Supporting evidence for the retraction",
+                },
+                "failure_mode": {
+                    "type": "string",
+                    "description": "How the original belief fails: 'smuggled-premise' | 'unsupported-superlative' | 'false-causal-link' | 'domain-conflation' | 'contradicted-by-source' | 'stale'",
+                },
+            },
+            "required": ["target_id"],
+        },
+    },
+    {
+        "name": "propose_supersede",
+        "description": (
+            "Propose superseding a hive belief with corrected text WITHOUT changing "
+            "any truth value. Creates a pending proposal in the hive that a human "
+            "(or policy) must accept before the supersession applies. Use this for "
+            "beliefs that live in the read-only hive — supersede_belief only works on "
+            "the local brain. Returns the proposal id, the generated new belief id, "
+            "and the computed cascade impact."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "old_id": {
+                    "type": "string",
+                    "description": "The belief ID to supersede (the old one)",
+                },
+                "new_text": {
+                    "type": "string",
+                    "description": "The corrected belief text — a single atomic claim that replaces the old one",
+                },
+                "new_id": {
+                    "type": "string",
+                    "description": "Optional ID for the replacement belief (defaults to '<old_id>-vN' if it would not collide)",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Why the belief should be superseded (free text)",
+                },
+                "basis": {
+                    "type": "string",
+                    "description": "Evidential basis: 'source-divergence' | 'detected-contradiction' | 'prior-knowledge' (default)",
+                },
+                "evidence": {
+                    "type": "string",
+                    "description": "Supporting evidence for the replacement",
+                },
+                "failure_mode": {
+                    "type": "string",
+                    "description": "How the original belief fails: 'smuggled-premise' | 'unsupported-superlative' | 'false-causal-link' | 'domain-conflation' | 'contradicted-by-source' | 'stale'",
+                },
+            },
+            "required": ["old_id", "new_text"],
+        },
+    },
+    {
+        "name": "list_hive_proposals",
+        "description": (
+            "List hive proposals (pending retraction/supersession/addition requests) "
+            "and their status. Read-only. Use this to see what has been proposed for "
+            "the hive and what is still awaiting a human accept/reject."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "description": "Filter by status: 'pending' | 'accepted' | 'rejected' | 'withdrawn' | 'stale' (default: all)",
+                },
+                "target": {
+                    "type": "string",
+                    "description": "Filter by target belief ID",
+                },
+                "proposer": {
+                    "type": "string",
+                    "description": "Filter by proposer (e.g. 'worker-bee')",
+                },
+            },
+        },
+    },
 ]
 
 
@@ -583,6 +689,16 @@ class BeliefStore:
         overlap = local_ids & hive_ids
         if overlap:
             raise ValueError(f"Belief ID conflict between local and hive: {overlap}")
+
+    @property
+    def hive_proposal_path(self) -> str | None:
+        """The database path hive proposals target.
+
+        Proposals live in the shared hive layer. When no separate hive is
+        configured (single-DB mode), proposals fall back to the local layer
+        so the propose → accept workflow still works.
+        """
+        return self.hive_path or self.local_path
 
     @property
     def db_paths(self) -> list[str]:
@@ -764,6 +880,30 @@ def execute_tool(name: str, tool_input: dict) -> str:
         return _retract_belief(tool_input["id"], tool_input.get("reason", ""))
     elif name == "supersede_belief":
         return _supersede_belief(tool_input["id"], tool_input.get("text", ""), tool_input.get("new_id"))
+    elif name == "propose_retraction":
+        return _propose_retraction(
+            tool_input["target_id"],
+            reason=tool_input.get("reason", ""),
+            basis=tool_input.get("basis", "prior-knowledge"),
+            evidence=tool_input.get("evidence", ""),
+            failure_mode=tool_input.get("failure_mode", ""),
+        )
+    elif name == "propose_supersede":
+        return _propose_supersede(
+            tool_input["old_id"],
+            tool_input.get("new_text", ""),
+            new_id=tool_input.get("new_id"),
+            reason=tool_input.get("reason", ""),
+            basis=tool_input.get("basis", "prior-knowledge"),
+            evidence=tool_input.get("evidence", ""),
+            failure_mode=tool_input.get("failure_mode", ""),
+        )
+    elif name == "list_hive_proposals":
+        return _list_hive_proposals(
+            status=tool_input.get("status", ""),
+            target=tool_input.get("target"),
+            proposer=tool_input.get("proposer"),
+        )
     elif name == "list_notes":
         return _list_notes(limit=tool_input.get("limit", 50))
     elif name == "update_note":
@@ -1376,7 +1516,8 @@ def _retract_belief(belief_id: str, reason: str = "") -> str:
     if status == "hive":
         return (
             f"Error: belief '{belief_id}' exists only in the read-only hive. "
-            "Retracting it is not permitted; supersede it with a local belief instead."
+            "Retracting it directly is not permitted; use the propose_retraction "
+            "tool to propose it to the hive for a human to accept."
         )
     try:
         from reasons.api import retract_node
@@ -1406,7 +1547,8 @@ def _supersede_belief(belief_id: str, text: str, new_id: str | None = None) -> s
     if status == "hive":
         return (
             f"Error: belief '{belief_id}' exists only in the read-only hive. "
-            "Supersede it by adding a new local belief instead."
+            "Superseding it directly is not permitted; use the propose_supersede "
+            "tool to propose a replacement to the hive for a human to accept."
         )
     if not text or not text.strip():
         return "Error: replacement text is empty"
@@ -1436,4 +1578,181 @@ def _supersede_belief(belief_id: str, text: str, new_id: str | None = None) -> s
     changed = [n for n in result.get("changed", []) if n != belief_id]
     if changed:
         lines.append(f"Also affected: {', '.join(changed)}")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Hive proposals (read-only hive → propose, human accepts)
+#
+# These tools implement the worker-bee surface of docs/hive-proposals.md §8:
+# instead of writing the shared hive directly (refused by retract_belief /
+# supersede_belief), the bee *proposes* a change and a human (or policy)
+# accepts it. Proposals never change any truth value.
+# ---------------------------------------------------------------------------
+
+_PROPOSER = "worker-bee"
+
+
+def _hive_proposal_path() -> str | None:
+    """Resolve the database path hive proposals target, or None if there is
+    no belief database configured at all."""
+    if not _belief_store.has_any:
+        return None
+    return _belief_store.hive_proposal_path
+
+
+def _format_proposal_impact(impact: dict) -> list[str]:
+    """Render a what_if_* impact diff as human-readable lines."""
+    lines: list[str] = []
+    total = impact.get("total_affected", 0)
+    lines.append(f"Impact: {total} belief(s) would be affected")
+    retracted = impact.get("retracted") or []
+    if retracted:
+        ids = ", ".join(n.get("id", "?") for n in retracted)
+        lines.append(f"Would go OUT: {ids}")
+    restored = impact.get("restored") or []
+    if restored:
+        ids = ", ".join(n.get("id", "?") for n in restored)
+        lines.append(f"Would be restored IN: {ids}")
+    return lines
+
+
+def _propose_retraction(
+    target_id: str,
+    reason: str = "",
+    basis: str = "prior-knowledge",
+    evidence: str = "",
+    failure_mode: str = "",
+) -> str:
+    path = _hive_proposal_path()
+    if not path:
+        return "Error: no belief database configured for this session"
+    try:
+        from reasons.api import propose_retraction
+        result = propose_retraction(
+            target_id,
+            reason=reason,
+            failure_mode=failure_mode,
+            basis=basis,
+            evidence=evidence,
+            proposer=_PROPOSER,
+            db_path=path,
+        )
+    except Exception as e:
+        return f"Error proposing retraction: {e}"
+    lines = [
+        f"Proposed retraction of '{target_id}' — pending (no truth values changed). "
+        f"A human must accept it (e.g. `reasons accept {result['proposal_id']}`)."
+    ]
+    if reason:
+        lines.append(f"Reason: {reason}")
+    if failure_mode:
+        lines.append(f"Failure mode: {failure_mode}")
+    lines.append(f"Basis: {basis}")
+    lines.extend(_format_proposal_impact(result.get("impact", {})))
+    staled = result.get("staled") or []
+    if staled:
+        lines.append(f"Superseded older pending proposal(s): {', '.join(staled)}")
+    lines.append(f"Proposal id: {result['proposal_id']}")
+    return "\n".join(lines)
+
+
+def _propose_supersede(
+    old_id: str,
+    new_text: str,
+    new_id: str | None = None,
+    reason: str = "",
+    basis: str = "prior-knowledge",
+    evidence: str = "",
+    failure_mode: str = "",
+) -> str:
+    if not new_text or not new_text.strip():
+        return "Error: replacement text is empty"
+    path = _hive_proposal_path()
+    if not path:
+        return "Error: no belief database configured for this session"
+    try:
+        from reasons.api import propose_supersession
+        result = propose_supersession(
+            old_id,
+            new_text,
+            new_id=new_id or None,
+            reason=reason,
+            failure_mode=failure_mode,
+            basis=basis,
+            evidence=evidence,
+            proposer=_PROPOSER,
+            db_path=path,
+        )
+    except Exception as e:
+        return f"Error proposing supersession: {e}"
+    lines = [
+        f"Proposed supersession of '{old_id}' → '{result.get('new_id')}' — pending "
+        "(no truth values changed). A human must accept it "
+        f"(e.g. `reasons accept {result['proposal_id']}`)."
+    ]
+    if reason:
+        lines.append(f"Reason: {reason}")
+    if failure_mode:
+        lines.append(f"Failure mode: {failure_mode}")
+    lines.append(f"Basis: {basis}")
+    lines.extend(_format_proposal_impact(result.get("impact", {})))
+    staled = result.get("staled") or []
+    if staled:
+        lines.append(f"Superseded older pending proposal(s): {', '.join(staled)}")
+    lines.append(f"Proposal id: {result['proposal_id']}")
+    return "\n".join(lines)
+
+
+def _list_hive_proposals(
+    status: str = "",
+    target: str | None = None,
+    proposer: str | None = None,
+) -> str:
+    path = _hive_proposal_path()
+    if not path:
+        return "Error: no belief database configured for this session"
+    try:
+        from reasons.api import list_proposals
+        result = list_proposals(
+            status=status or None,
+            target_id=target or None,
+            proposer=proposer or None,
+            db_path=path,
+        )
+    except Exception as e:
+        return f"Error listing proposals: {e}"
+    proposals = result.get("proposals", [])
+    if not proposals:
+        scope = f" (status={status})" if status else ""
+        return f"No hive proposals found{scope}."
+    filters = []
+    if status:
+        filters.append(f"status={status}")
+    if target:
+        filters.append(f"target={target}")
+    if proposer:
+        filters.append(f"proposer={proposer}")
+    header = f"{result.get('count', len(proposals))} hive proposal(s)"
+    if filters:
+        header += f" [{', '.join(filters)}]"
+    header += ":"
+    lines = [header]
+    for p in proposals:
+        entry = (
+            f"{p['id']}  {p['action']}: {p['target_id']}"
+        )
+        if p.get("new_id"):
+            entry += f" → {p['new_id']}"
+        entry += f"  [{p['status']}]"
+        if p.get("proposer"):
+            entry += f"  proposer={p['proposer']}"
+        if p.get("basis"):
+            entry += f"  basis={p['basis']}"
+        entry += f"  impact={p.get('impact', {}).get('total_affected', 0)}"
+        if p.get("created_at"):
+            entry += f"  created={p['created_at']}"
+        lines.append(entry)
+    lines.append("Accept/reject via `reasons accept <id>` / `reasons reject <id>` (CLI), "
+                 "or ask a human to decide.")
     return "\n".join(lines)
