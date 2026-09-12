@@ -366,6 +366,56 @@ BELIEF_TOOLS = [
             "required": ["id", "text"],
         },
     },
+    {
+        "name": "retract_belief",
+        "description": (
+            "Retract an existing belief (mark it OUT) in the local belief database. "
+            "This cascades: any beliefs that depend on it are re-evaluated and may "
+            "go OUT too. Use this when a belief has turned out to be wrong or "
+            "outdated. Provide a short reason for the retraction (recommended)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "description": "The belief ID to retract (e.g. 'notes-not-persisted-to-disk')",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Why the belief is being retracted (stored in metadata for the audit trail)",
+                },
+            },
+            "required": ["id"],
+        },
+    },
+    {
+        "name": "supersede_belief",
+        "description": (
+            "Replace an existing belief with a new, corrected version. Creates a new "
+            "belief (auto-ID'd '<old_id>-v2' unless you supply one) that supersedes the "
+            "old one. The old belief goes OUT while the new one is IN; supersession is "
+            "reversible. Use this when a belief needs to be updated rather than deleted."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "description": "The belief ID to supersede (the old one)",
+                },
+                "text": {
+                    "type": "string",
+                    "description": "The corrected belief text — a single atomic claim that replaces the old one",
+                },
+                "new_id": {
+                    "type": "string",
+                    "description": "Optional ID for the new belief (defaults to '<id>-v2' if it would not collide)",
+                },
+            },
+            "required": ["id", "text"],
+        },
+    },
 ]
 
 
@@ -630,6 +680,10 @@ def execute_tool(name: str, tool_input: dict) -> str:
         return _list_blockers()
     elif name == "add_belief":
         return _add_belief(tool_input["id"], tool_input["text"], tool_input.get("source", ""))
+    elif name == "retract_belief":
+        return _retract_belief(tool_input["id"], tool_input.get("reason", ""))
+    elif name == "supersede_belief":
+        return _supersede_belief(tool_input["id"], tool_input.get("text", ""), tool_input.get("new_id"))
     elif name == "list_notes":
         return _list_notes(limit=tool_input.get("limit", 50))
     elif name == "update_note":
@@ -1172,3 +1226,86 @@ def _add_belief(belief_id, text, source=""):
         return f"Added belief '{belief_id}' [IN]"
     except Exception as e:
         return f"Error adding belief: {e}"
+
+
+def _local_or_hive_status(belief_id: str) -> str:
+    """Return 'local', 'hive', or 'none' for a belief id across the layers."""
+    if _belief_store.id_exists_in_local(belief_id):
+        return "local"
+    if _belief_store.id_exists_in_hive(belief_id):
+        return "hive"
+    return "none"
+
+
+def _retract_belief(belief_id: str, reason: str = "") -> str:
+    if not _belief_store.has_any:
+        return "Error: no belief database configured for this session"
+    if not _belief_store.local_path:
+        return "Error: no writable belief database configured"
+    status = _local_or_hive_status(belief_id)
+    if status == "none":
+        return f"Error: belief '{belief_id}' not found"
+    if status == "hive":
+        return (
+            f"Error: belief '{belief_id}' exists only in the read-only hive. "
+            "Retracting it is not permitted; supersede it with a local belief instead."
+        )
+    try:
+        from reasons.api import retract_node
+        result = retract_node(belief_id, reason=reason, db_path=_belief_store.local_path)
+    except Exception as e:
+        return f"Error retracting belief: {e}"
+    lines = [f"Retracted belief '{belief_id}' [OUT]"]
+    if reason:
+        lines.append(f"Reason: {reason}")
+    went_out = [n for n in result.get("went_out", []) if n != belief_id]
+    if went_out:
+        lines.append(f"Cascaded OUT: {', '.join(went_out)}")
+    went_in = result.get("went_in", [])
+    if went_in:
+        lines.append(f"Restored IN: {', '.join(went_in)}")
+    return "\n".join(lines)
+
+
+def _supersede_belief(belief_id: str, text: str, new_id: str | None = None) -> str:
+    if not _belief_store.has_any:
+        return "Error: no belief database configured for this session"
+    if not _belief_store.local_path:
+        return "Error: no writable belief database configured"
+    status = _local_or_hive_status(belief_id)
+    if status == "none":
+        return f"Error: belief '{belief_id}' not found"
+    if status == "hive":
+        return (
+            f"Error: belief '{belief_id}' exists only in the read-only hive. "
+            "Supersede it by adding a new local belief instead."
+        )
+    if not text or not text.strip():
+        return "Error: replacement text is empty"
+
+    # Resolve a collision-free id for the successor, checking both layers so a
+    # new belief never shadows or duplicates a hive id (same rule as add_belief).
+    if new_id:
+        target = new_id
+    else:
+        target = f"{belief_id}-v2"
+        suffix = 3
+        while _local_or_hive_status(target) != "none":
+            target = f"{belief_id}-v{suffix}"
+            suffix += 1
+    if _local_or_hive_status(target) != "none":
+        return f"Error: target belief '{target}' already exists. Choose a different new_id."
+
+    try:
+        from reasons.api import supersede_with_text
+        result = supersede_with_text(
+            belief_id, text, new_id=target, db_path=_belief_store.local_path
+        )
+    except Exception as e:
+        return f"Error superseding belief: {e}"
+    resolved_new_id = result.get("new_id", target)
+    lines = [f"Superseded belief '{belief_id}' → new belief '{resolved_new_id}' [IN]"]
+    changed = [n for n in result.get("changed", []) if n != belief_id]
+    if changed:
+        lines.append(f"Also affected: {', '.join(changed)}")
+    return "\n".join(lines)
