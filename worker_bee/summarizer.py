@@ -165,6 +165,8 @@ def _write_entry(summary: str, events: list[dict], entry_dir: str | Path) -> Pat
     slug = re.sub(r'[\s_]+', '-', slug)
     slug = re.sub(r'-+', '-', slug).strip('-') or "session-summary"
 
+    from worker_bee.tools import _atomic_write_text
+
     entry_path = date_dir / f"{slug}.md"
-    entry_path.write_text(summary)
+    _atomic_write_text(entry_path, summary)
     return entry_path

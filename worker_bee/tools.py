@@ -14,6 +14,7 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -470,31 +471,39 @@ class NoteStore:
     def _flush(self) -> None:
         if not self.path:
             return
-        try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.path, "w") as f:
-                for entry in self._notes:
-                    f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-        except OSError as e:
-            # Persistence is best-effort; in-memory copy still works.
-            print(f"warning: could not persist notes: {e}", file=sys.stderr)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        text = "".join(json.dumps(entry, ensure_ascii=False) + "\n"
+                       for entry in self._notes)
+        # Atomic replace: on success the file is complete; on failure the
+        # previous file (if any) is left intact and the error propagates so
+        # callers can roll back their in-memory state and report the failure.
+        _atomic_write_text(self.path, text)
 
     def list(self) -> list[dict]:
         return list(self._notes)
 
     def add(self, note: str) -> int:
-        """Append a note. Returns its index in the store."""
+        """Append a note. Returns its index in the store.
+
+        Raises on persistence failure: the in-memory state is rolled back so
+        it never diverges from what is actually on disk.
+        """
         if not note or not note.strip():
             raise ValueError("note text is empty")
         entry = {
             "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "note": note,
         }
+        previous = [dict(e) for e in self._notes]
         self._notes.append(entry)
         # Cap the history: rotate out the oldest entries beyond the cap.
         if self.max_notes and len(self._notes) > self.max_notes:
             self._notes = self._notes[-self.max_notes:]
-        self._flush()
+        try:
+            self._flush()
+        except BaseException:
+            self._notes = previous
+            raise
         return len(self._notes) - 1
 
     def get(self, index: int) -> dict:
@@ -508,15 +517,25 @@ class NoteStore:
         if not note or not note.strip():
             raise ValueError("note text is empty")
         entry = self.get(index)
+        previous = [dict(e) for e in self._notes]
         entry["note"] = note
         entry["ts"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        self._flush()
+        try:
+            self._flush()
+        except BaseException:
+            self._notes = previous
+            raise
         return entry
 
     def delete(self, index: int) -> int:
         self.get(index)  # validates range
+        previous = [dict(e) for e in self._notes]
         self._notes.pop(index)
-        self._flush()
+        try:
+            self._flush()
+        except BaseException:
+            self._notes = previous
+            raise
         return len(self._notes)
 
 
@@ -813,12 +832,47 @@ def _read_file(path, offset=None, limit=None):
     return result
 
 
+def _atomic_write_text(path, text: str) -> None:
+    """Write ``text`` to ``path`` atomically.
+
+    The content is written to a temporary file in the same directory
+    (guaranteeing the same filesystem), flushed, fsynced, then moved over
+    ``path`` with ``os.replace`` — an atomic rename on POSIX. If anything
+    fails before the rename, the existing ``path`` is left completely
+    untouched and no stale temporary file remains.
+    """
+    path = Path(path)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except (OSError, ValueError):
+                pass  # not fatal on all filesystems
+        try:
+            if path.exists():
+                # Preserve the target's permissions on the replacement.
+                os.chmod(tmp_name, path.stat().st_mode & 0o777)
+        except OSError:
+            pass
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
 def _write_file(path, content):
     try:
         path = _workspace_path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w") as f:
-            f.write(content)
+        _atomic_write_text(path, content)
         return f"Successfully wrote to {path}"
     except Exception as e:
         return f"Error writing file: {e}"
@@ -837,8 +891,7 @@ def _edit_file(path, old_string, new_string):
             return f"Error: old_string appears {count} times in {path} — must be unique"
 
         new_content = content.replace(old_string, new_string, 1)
-        with open(path, "w") as f:
-            f.write(new_content)
+        _atomic_write_text(path, new_content)
         return f"Successfully edited {path}"
     except Exception as e:
         return f"Error editing file: {e}"
