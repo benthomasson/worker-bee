@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
-from worker_bee.llm import invoke_model, create_provider, ChatResponse, _record_cost
+from worker_bee.llm import (
+    invoke_model,
+    create_provider,
+    ChatResponse,
+    get_last_usage,
+    reset_last_usage,
+)
 
 
 DEFAULT_MODEL = "ollama:qwen3.8:27b"
@@ -16,6 +23,7 @@ class Response:
     model: str
     prompt_tokens: int
     completion_tokens: int
+    error: str | None = None
 
 
 def dispatch(
@@ -30,12 +38,14 @@ def dispatch(
     Works with any supported model string: ollama:*, claude, gemini,
     api:*, vertex:*.
     """
+    reset_last_usage()
     text = invoke_model(prompt, model=model, timeout=timeout)
+    usage = get_last_usage()
     return Response(
         text=text,
         model=model,
-        prompt_tokens=0,
-        completion_tokens=0,
+        prompt_tokens=usage["prompt_tokens"],
+        completion_tokens=usage["completion_tokens"],
     )
 
 
@@ -62,13 +72,39 @@ def dispatch_batch(
     *,
     model: str = DEFAULT_MODEL,
     timeout: int = 300,
+    max_workers: int = 4,
+    retries: int = 2,
 ) -> list[tuple[dict, Response]]:
-    """Dispatch multiple (issue, prompt) pairs sequentially.
+    """Dispatch prompts concurrently, retrying failures independently.
 
-    Returns list of (issue, response) tuples.
+    Results retain input order. A failed item is returned as a Response with
+    ``error`` populated rather than aborting the whole batch.
     """
-    results = []
-    for issue, prompt in prompts:
-        resp = dispatch(prompt, model=model, timeout=timeout)
-        results.append((issue, resp))
+    if retries < 0:
+        raise ValueError("retries must be non-negative")
+    if not prompts:
+        return []
+
+    def run_one(issue_prompt):
+        issue, prompt = issue_prompt
+        last_error = None
+        for _ in range(retries + 1):
+            try:
+                return issue, dispatch(prompt, model=model, timeout=timeout)
+            except Exception as exc:
+                last_error = exc
+        return issue, Response(
+            text="",
+            model=model,
+            prompt_tokens=0,
+            completion_tokens=0,
+            error=f"{type(last_error).__name__}: {last_error}",
+        )
+
+    workers = max(1, min(max_workers, len(prompts)))
+    results = [None] * len(prompts)
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(run_one, item): index for index, item in enumerate(prompts)}
+        for future in as_completed(futures):
+            results[futures[future]] = future.result()
     return results

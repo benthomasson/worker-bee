@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import threading
 import urllib.request
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 
 try:
@@ -57,6 +58,9 @@ _langfuse_handler = None
 _langfuse_checked = False
 
 _cost_lock = threading.Lock()
+_last_usage: ContextVar[dict[str, int]] = ContextVar(
+    "worker_bee_last_usage", default={"prompt_tokens": 0, "completion_tokens": 0}
+)
 
 _cost_tracker = {
     "calls": 0,
@@ -99,7 +103,11 @@ def format_cost_summary() -> str:
 
 
 def _record_cost(model: str, input_tokens: int, output_tokens: int, cost_usd: float):
-    """Record token/cost stats from one LLM call."""
+    """Record token/cost stats from one LLM call and expose its usage."""
+    _last_usage.set({
+        "prompt_tokens": int(input_tokens or 0),
+        "completion_tokens": int(output_tokens or 0),
+    })
     with _cost_lock:
         _cost_tracker["calls"] += 1
         _cost_tracker["input_tokens"] += input_tokens
@@ -238,7 +246,25 @@ def _invoke_api(prompt: str, model: str, timeout: int = 300) -> str:
             raise subprocess.TimeoutExpired(model, timeout) from exc
         raise RuntimeError(f"{model} failed: {exc}") from exc
 
+    response_metadata = getattr(response, "response_metadata", None) or {}
+    usage = getattr(response, "usage_metadata", None) or response_metadata.get("usage", {})
+    if usage:
+        input_tokens = usage.get("input_tokens", usage.get("prompt_tokens", 0))
+        output_tokens = usage.get("output_tokens", usage.get("completion_tokens", 0))
+        _record_cost(model, input_tokens, output_tokens, 0.0)
+    else:
+        _last_usage.set({"prompt_tokens": 0, "completion_tokens": 0})
     return response.content
+
+
+def reset_last_usage() -> None:
+    """Clear usage before an invocation (useful when an adapter has no usage)."""
+    _last_usage.set({"prompt_tokens": 0, "completion_tokens": 0})
+
+
+def get_last_usage() -> dict[str, int]:
+    """Return token usage from the most recent invocation in this context."""
+    return dict(_last_usage.get())
 
 
 def invoke_model(prompt: str, model: str = "claude", timeout: int = 300) -> str:

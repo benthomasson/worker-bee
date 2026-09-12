@@ -1,0 +1,10 @@
+{
+  "started": "2026-09-11T10:15:26",
+  "finished": "2026-09-11T14:56:34",
+  "explore_limit": 500,
+  "rounds": 1,
+  "beliefs_before": 28,
+  "beliefs_after": 1554,
+  "beliefs_added": 1526,
+  "errors": []
+}
