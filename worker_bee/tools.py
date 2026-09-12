@@ -554,7 +554,8 @@ _belief_store = BeliefStore()
 # are also run without a shell and must use an approved executable.
 _workspace_root = Path.cwd().resolve()
 _ALLOWED_COMMANDS = frozenset({
-    "cat", "find", "git", "grep", "ls", "python", "pytest", "pwd", "ruff", "uv",
+    "cat", "cargo", "find", "git", "grep", "ls", "python", "pytest", "pwd",
+    "ruff", "uv",
 })
 
 
@@ -853,6 +854,29 @@ def _glob(pattern, path):
     return "\n".join(sorted(filtered))
 
 
+def _check_pytest_paths(pytest_args):
+    """Keep pytest's file/config roots confined to the workspace.
+
+    These options and positional paths are interpreted by the pytest process
+    itself rather than the host shell.
+    """
+    path_options = {"--rootdir", "--confcutdir", "--basetemp"}
+    for index, arg in enumerate(pytest_args):
+        value = None
+        if arg in path_options and index + 1 < len(pytest_args):
+            value = pytest_args[index + 1]
+        elif any(arg.startswith(option + "=") for option in path_options):
+            value = arg.split("=", 1)[1]
+        elif not arg.startswith("-"):
+            value = arg
+        if value is not None:
+            try:
+                _workspace_path(value)
+            except ValueError as e:
+                return f"Error: pytest path is outside workspace: {e}"
+    return None
+
+
 def _validate_special_command(argv):
     """Reject command-specific escape hatches not covered by path checks."""
     executable = Path(argv[0]).name
@@ -895,6 +919,19 @@ def _validate_special_command(argv):
                for arg in args):
             return "Error: git helper options are not allowed"
 
+    if executable == "cargo":
+        # Permit building, testing, and inspecting the workspace's Rust
+        # packages.  Installing, linking, and toolchain operations that fetch
+        # or execute arbitrary code remain rejected.
+        subcommand = next((arg for arg in args if not arg.startswith("-") and not arg.startswith("+")), None)
+        if subcommand in {"add", "bench", "install", "login", "publish", "remove", "vendor"}:
+            return f"Error: cargo subcommand is not allowed: {subcommand}"
+        if any(arg.startswith("+") for arg in args):
+            return "Error: cargo toolchain overrides are not allowed"
+        allowed = {"build", "check", "clippy", "doc", "fmt", "test"}
+        if subcommand not in allowed:
+            return f"Error: cargo subcommand is not allowed: {subcommand or '(missing)'}"
+
     if executable == "uv":
         # uv run/tool can execute an arbitrary program.  uv's environment
         # selectors and cache/output locations must not point outside the root.
@@ -904,23 +941,8 @@ def _validate_special_command(argv):
             # test code, so this is an intentional, narrowly scoped exception.
             if len(args) < 2 or args[1] != "pytest":
                 return "Error: uv arbitrary program execution is not allowed"
-            # Keep pytest's file/config roots confined as well; these options
-            # are interpreted by the nested pytest process rather than uv.
-            pytest_args = args[2:]
-            path_options = {"--rootdir", "--confcutdir", "--basetemp"}
-            for index, arg in enumerate(pytest_args):
-                value = None
-                if arg in path_options and index + 1 < len(pytest_args):
-                    value = pytest_args[index + 1]
-                elif any(arg.startswith(option + "=") for option in path_options):
-                    value = arg.split("=", 1)[1]
-                elif not arg.startswith("-"):
-                    value = arg
-                if value is not None:
-                    try:
-                        _workspace_path(value)
-                    except ValueError as e:
-                        return f"Error: pytest path is outside workspace: {e}"
+            # Keep pytest's file/config roots confined as well.
+            return _check_pytest_paths(args[2:])
         elif args and args[0] == "tool":
             return "Error: uv arbitrary program execution is not allowed"
         if any(arg == "--system" for arg in args):
@@ -968,7 +990,7 @@ def _run_command(command):
     # Validate directory options and the positional path arguments of commands
     # that can read or execute files.  Resolution also rejects symlinks leaving
     # the workspace.
-    path_options = {"-C", "--directory", "--cwd", "--work-tree", "--git-dir"}
+    path_options = {"-C", "--directory", "--cwd", "--work-tree", "--git-dir", "--manifest-path"}
     path_args = set()
     if executable in {"cat", "find", "ls", "pytest", "ruff"}:
         path_args = {i for i, arg in enumerate(argv[1:], 1) if not arg.startswith("-")}
@@ -976,9 +998,19 @@ def _run_command(command):
         non_options = [i for i, arg in enumerate(argv[1:], 1) if not arg.startswith("-")]
         path_args = set(non_options[1:])  # first non-option is the pattern
     elif executable == "python":
-        if "-c" in argv or "-m" in argv or "-" in argv:
-            return "Error: inline/module Python execution is not allowed"
-        path_args = {i for i, arg in enumerate(argv[1:], 1) if not arg.startswith("-")}
+        if "-c" in argv or "-" in argv:
+            return "Error: inline Python execution is not allowed"
+        if "-m" in argv:
+            # Permit the project's test runner as a module, but do not let
+            # -m become a general arbitrary-module launcher.
+            index = argv.index("-m")
+            if index + 1 >= len(argv) or argv[index + 1] != "pytest":
+                return "Error: python -m arbitrary module execution is not allowed"
+            error = _check_pytest_paths(argv[index + 2:])
+            if error:
+                return error
+        else:
+            path_args = {i for i, arg in enumerate(argv[1:], 1) if not arg.startswith("-")}
 
     for index, arg in enumerate(argv[1:], 1):
         value = None

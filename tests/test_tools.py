@@ -101,6 +101,61 @@ def test_uv_run_pytest_is_allowed_but_arbitrary_uv_run_is_not(tmp_path):
     assert "arbitrary program execution is not allowed" in arbitrary_result
 
 
+def test_python_m_pytest_is_allowed_but_arbitrary_modules_are_not(tmp_path):
+    tools.set_workspace_root(tmp_path)
+
+    pytest_result = tools.execute_tool(
+        "run_command", {"command": "python -m pytest -q"}
+    )
+    module_result = tools.execute_tool(
+        "run_command", {"command": "python -m http.server 8000"}
+    )
+    inline_result = tools.execute_tool(
+        "run_command", {"command": "python -c 'print(1)'"}
+    )
+
+    assert "arbitrary module execution is not allowed" not in pytest_result
+    assert "arbitrary module execution is not allowed" in module_result
+    assert "inline Python execution is not allowed" in inline_result
+
+
+def test_python_m_pytest_paths_are_confined(tmp_path):
+    tools.set_workspace_root(tmp_path)
+
+    result = tools.execute_tool(
+        "run_command", {"command": "python -m pytest ../tests"}
+    )
+    assert "outside workspace" in result
+
+
+def test_cargo_build_and_test_are_allowed_but_install_is_not(tmp_path):
+    tools.set_workspace_root(tmp_path)
+
+    build = tools.execute_tool("run_command", {"command": "cargo build"})
+    check = tools.execute_tool("run_command", {"command": "cargo clippy --all-targets"})
+
+    assert "cargo subcommand is not allowed" not in build
+    assert "cargo subcommand is not allowed" not in check
+    assert "cargo subcommand is not allowed" in tools.execute_tool(
+        "run_command", {"command": "cargo install ripgrep"}
+    )
+    assert "cargo subcommand is not allowed" in tools.execute_tool(
+        "run_command", {"command": "cargo add serde"}
+    )
+    assert "cargo toolchain overrides are not allowed" in tools.execute_tool(
+        "run_command", {"command": "cargo +nightly build"}
+    )
+
+
+def test_cargo_manifest_path_is_confined(tmp_path):
+    tools.set_workspace_root(tmp_path)
+
+    result = tools.execute_tool(
+        "run_command", {"command": "cargo build --manifest-path ../Cargo.toml"}
+    )
+    assert "outside workspace" in result
+
+
 def test_workspace_symlink_cannot_escape(tmp_path):
     tools.set_workspace_root(tmp_path)
     outside = tmp_path.parent / "real.txt"
