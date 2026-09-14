@@ -1115,15 +1115,28 @@ def _grep(pattern, path):
     matches = []
     skip = {".git", ".venv", "node_modules", "__pycache__", "target"}
     for root, dirs, files in os.walk(path):
-        dirs[:] = [d for d in dirs if d not in skip and not d.startswith(".")]
+        # os.walk does not follow directory symlinks by default, but prune them
+        # explicitly so this remains true if traversal options change later.
+        dirs[:] = [
+            d for d in dirs
+            if d not in skip
+            and not d.startswith(".")
+            and not Path(root, d).is_symlink()
+        ]
         for filename in files:
-            filepath = os.path.join(root, filename)
+            filepath = Path(root, filename)
             try:
-                with open(filepath, "r", errors="ignore") as f:
+                # A file symlink can point outside the workspace (or an
+                # explicitly granted read-only root). Resolve and validate the
+                # target before opening it, just as _glob does for its matches.
+                resolved = filepath.resolve()
+                if _any_allowed_root(resolved) is None or not resolved.is_file():
+                    continue
+                with open(resolved, "r", errors="ignore") as f:
                     for i, line in enumerate(f, 1):
                         if regex.search(line):
                             matches.append(f"{filepath}:{i}: {line.rstrip()}")
-            except (OSError, IsADirectoryError):
+            except (OSError, IsADirectoryError, ValueError):
                 continue
 
     if not matches:

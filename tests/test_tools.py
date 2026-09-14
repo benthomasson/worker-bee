@@ -190,3 +190,26 @@ def test_glob_filters_symlink_matches_outside_workspace(tmp_path):
     result = tools.execute_tool("glob", {"pattern": "*.txt"})
 
     assert result == "No files found"
+
+
+def test_grep_filters_file_symlinks_outside_workspace(tmp_path):
+    tools.set_workspace_root(tmp_path)
+    outside = tmp_path.parent / "outside.txt"
+    outside.write_text("secret needle")
+    (tmp_path / "link.txt").symlink_to(outside)
+
+    result = tools.execute_tool("grep", {"pattern": "needle"})
+
+    assert result == "No matches found"
+
+
+def test_grep_does_not_traverse_directory_symlinks(tmp_path):
+    tools.set_workspace_root(tmp_path)
+    outside = tmp_path.parent / "outside-dir"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("secret needle")
+    (tmp_path / "linked-dir").symlink_to(outside, target_is_directory=True)
+
+    result = tools.execute_tool("grep", {"pattern": "needle"})
+
+    assert result == "No matches found"
