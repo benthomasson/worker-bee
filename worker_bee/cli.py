@@ -328,8 +328,9 @@ def _maybe_configure_mcp(args) -> None:
     if not token:
         import os
         token = os.environ.get("REASONS_MCP_TOKEN", "")
-    if not token:
-        print("Error: --mcp-token or REASONS_MCP_TOKEN env var required with --mcp", file=sys.stderr)
+    is_local = "localhost" in mcp_url or "127.0.0.1" in mcp_url
+    if not token and not is_local:
+        print("Error: --mcp-token or REASONS_MCP_TOKEN env var required with --mcp (not needed for localhost)", file=sys.stderr)
         sys.exit(1)
     domain_id = getattr(args, "mcp_domain", None)
     from worker_bee.mcp_beliefs import set_mcp_beliefs

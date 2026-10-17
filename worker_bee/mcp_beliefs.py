@@ -24,7 +24,7 @@ def _next_id() -> str:
 class McpBeliefStore:
     """Belief store backed by a reasons-service-edge MCP server."""
 
-    def __init__(self, mcp_url: str, token: str, domain_id: str | None = None):
+    def __init__(self, mcp_url: str, token: str | None = None, domain_id: str | None = None):
         try:
             import httpx
         except ImportError:
@@ -41,8 +41,9 @@ class McpBeliefStore:
     def _call(self, tool_name: str, arguments: dict) -> dict | list | str:
         headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.token}",
         }
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
         if self._session_id:
             headers["Mcp-Session-Id"] = self._session_id
 
