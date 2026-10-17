@@ -878,6 +878,13 @@ def _execute_mcp_belief_tool(mcp, name: str, tool_input: dict) -> str:
             return result
         return f"Unknown MCP belief tool: {name}"
     except Exception as e:
+        err = str(e)
+        if "Connection refused" in err or "ConnectError" in err:
+            return (
+                f"Error: MCP belief server is not reachable ({mcp.mcp_url}). "
+                "The belief search/query tools are unavailable this session. "
+                "Continue without belief tools — use other tools to complete the task."
+            )
         return f"Error (MCP): {e}"
 
 
