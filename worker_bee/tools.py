@@ -850,8 +850,47 @@ def set_belief_db(db_path: str | None, brain_path: str | None = None) -> None:
         _belief_store = BeliefStore()
 
 
+def _execute_mcp_belief_tool(mcp, name: str, tool_input: dict) -> str:
+    """Route a belief tool call through the MCP store."""
+    try:
+        if name == "show_belief":
+            return mcp.show(tool_input["id"])
+        elif name == "search_beliefs":
+            return mcp.search(tool_input["query"], tool_input.get("limit", 20))
+        elif name == "list_blockers":
+            return mcp.list_beliefs(truth_value="IN")
+        elif name == "add_belief":
+            return mcp.propose_belief(
+                tool_input["id"], tool_input["text"], tool_input.get("source", "")
+            )
+        elif name == "propose_retraction":
+            return mcp.propose_retraction(
+                tool_input["target_id"], tool_input.get("reason", "")
+            )
+        elif name == "propose_supersede":
+            result = mcp.propose_retraction(
+                tool_input["old_id"], tool_input.get("reason", "")
+            )
+            new_text = tool_input.get("new_text", "")
+            if new_text:
+                new_id = tool_input.get("new_id", f"{tool_input['old_id']}-v2")
+                result += "\n" + mcp.propose_belief(new_id, new_text)
+            return result
+        return f"Unknown MCP belief tool: {name}"
+    except Exception as e:
+        return f"Error (MCP): {e}"
+
+
 def execute_tool(name: str, tool_input: dict) -> str:
     """Execute a tool by name. Returns the result as a string."""
+    # Route belief tools through MCP when an MCP store is active
+    from .mcp_beliefs import get_mcp_store
+    mcp = get_mcp_store()
+    if mcp and name in (
+        "show_belief", "search_beliefs", "list_blockers",
+        "add_belief", "propose_retraction", "propose_supersede",
+    ):
+        return _execute_mcp_belief_tool(mcp, name, tool_input)
     if name == "read_file":
         return _read_file(
             tool_input["path"],

@@ -66,6 +66,9 @@ def main(argv: list[str] | None = None) -> int:
     sub_edit.add_argument("--num-ctx", type=int, default=65536, help="Context window size in tokens (default: 65536)")
     sub_edit.add_argument("--db", default=None, help="Path to reasons.db (enables belief query tools)")
     sub_edit.add_argument("--brain", default=None, help="Path to local brain reasons.db (read/write, layered over --db as hive)")
+    sub_edit.add_argument("--mcp", default=None, metavar="URL", help="MCP server URL for remote belief access (e.g. https://library.reasonsforge.com/mcp)")
+    sub_edit.add_argument("--mcp-token", default=None, help="Auth token for MCP server")
+    sub_edit.add_argument("--mcp-domain", default=None, help="Domain ID to use on the MCP server")
     sub_edit.add_argument("--truncate-chars", type=int, default=None, help="Truncate assistant output to N chars on stderr (default: no truncation)")
     sub_edit.add_argument("--ctx-limit-pct", type=float, default=0.80, help="Stop at this fraction of context window (0 to disable, default: 0.80)")
     sub_edit.add_argument("--read-only", action="append", default=[], metavar="DIR",
@@ -75,6 +78,9 @@ def main(argv: list[str] | None = None) -> int:
     sub_prompt = subparsers.add_parser("prompt", help="Run a freeform prompt with tool use")
     sub_prompt.add_argument("task", help="The prompt / task description")
     sub_prompt.add_argument("--db", default=None, help="Path to reasons.db (enables belief query tools)")
+    sub_prompt.add_argument("--mcp", default=None, metavar="URL", help="MCP server URL for remote belief access")
+    sub_prompt.add_argument("--mcp-token", default=None, help="Auth token for MCP server")
+    sub_prompt.add_argument("--mcp-domain", default=None, help="Domain ID to use on the MCP server")
     sub_prompt.add_argument("--model", default="ollama:qwen3.8:27b", help="Model to use")
     sub_prompt.add_argument("--max-turns", type=int, default=20, help="Max conversation turns (default: 20)")
     sub_prompt.add_argument("--dry-run", action="store_true", help="Show tool calls without executing them")
@@ -92,6 +98,9 @@ def main(argv: list[str] | None = None) -> int:
     sub_chat = subparsers.add_parser("chat", help="Interactive chat with a worker bee (fresh context each prompt)")
     sub_chat.add_argument("--db", default=None, help="Path to reasons.db (enables belief query tools)")
     sub_chat.add_argument("--brain", default=None, help="Path to local brain reasons.db (read/write, layered over --db as hive)")
+    sub_chat.add_argument("--mcp", default=None, metavar="URL", help="MCP server URL for remote belief access")
+    sub_chat.add_argument("--mcp-token", default=None, help="Auth token for MCP server")
+    sub_chat.add_argument("--mcp-domain", default=None, help="Domain ID to use on the MCP server")
     sub_chat.add_argument("--model", default="ollama:qwen3.8:27b", help="Model to use")
     sub_chat.add_argument("--max-turns", type=int, default=20, help="Max turns per prompt (default: 20)")
     sub_chat.add_argument("--dry-run", action="store_true", help="Show tool calls without executing them")
@@ -117,6 +126,8 @@ def main(argv: list[str] | None = None) -> int:
     sub_run.add_argument("--dry-run", action="store_true", help="Print prompts without dispatching")
 
     args = parser.parse_args(argv)
+
+    _maybe_configure_mcp(args)
 
     if args.command is None:
         parser.print_help()
@@ -306,6 +317,24 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     return 0
+
+
+def _maybe_configure_mcp(args) -> None:
+    """Configure MCP belief store if --mcp was passed."""
+    mcp_url = getattr(args, "mcp", None)
+    if not mcp_url:
+        return
+    token = getattr(args, "mcp_token", None)
+    if not token:
+        import os
+        token = os.environ.get("REASONS_MCP_TOKEN", "")
+    if not token:
+        print("Error: --mcp-token or REASONS_MCP_TOKEN env var required with --mcp", file=sys.stderr)
+        sys.exit(1)
+    domain_id = getattr(args, "mcp_domain", None)
+    from worker_bee.mcp_beliefs import set_mcp_beliefs
+    store = set_mcp_beliefs(mcp_url, token, domain_id)
+    print(f"MCP beliefs: {mcp_url} (domain={domain_id or 'all'})", file=sys.stderr)
 
 
 def _version() -> str:
