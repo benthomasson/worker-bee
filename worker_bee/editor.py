@@ -296,8 +296,11 @@ def run_edit_loop(
     tools = TOOLS[:]
     if chat_mode and allow_questions:
         tools.extend(CHAT_TOOLS)
+    from .mcp_beliefs import get_mcp_store
     if db_path or brain_path:
         set_belief_db(db_path, brain_path=brain_path)
+        tools.extend(BELIEF_TOOLS)
+    elif get_mcp_store():
         tools.extend(BELIEF_TOOLS)
 
     ctx_limit = num_ctx or 0
