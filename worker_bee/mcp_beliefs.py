@@ -38,21 +38,45 @@ class McpBeliefStore:
         self._session_id: str | None = None
         self._client = httpx.Client(timeout=30)
 
+    @staticmethod
+    def _parse_sse(text: str) -> dict | None:
+        """Extract the JSON-RPC response from an SSE stream."""
+        for line in text.splitlines():
+            line = line.strip()
+            if line.startswith("data: ") and line != "data: ":
+                try:
+                    return json.loads(line[6:])
+                except (json.JSONDecodeError, ValueError):
+                    continue
+        return None
+
+    def _post(self, headers: dict, body: dict) -> tuple[dict, dict]:
+        """Post a JSON-RPC request; return (parsed_data, response_headers)."""
+        resp = self._client.post(self.mcp_url, headers=headers, json=body)
+        resp.raise_for_status()
+        resp_headers = dict(resp.headers)
+        ct = resp.headers.get("content-type", "")
+        if "text/event-stream" in ct:
+            data = self._parse_sse(resp.text)
+            if data is None:
+                raise RuntimeError(f"No JSON-RPC response in SSE stream")
+            return data, resp_headers
+        return resp.json(), resp_headers
+
     def _call(self, tool_name: str, arguments: dict) -> dict | list | str:
         headers = {
             "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
         }
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
         if self._session_id:
             headers["Mcp-Session-Id"] = self._session_id
 
-        # Initialize session if needed
         if not self._session_id:
-            init_resp = self._client.post(
-                self.mcp_url,
-                headers=headers,
-                json={
+            init_data, init_headers = self._post(
+                headers,
+                {
                     "jsonrpc": "2.0",
                     "id": _next_id(),
                     "method": "initialize",
@@ -63,36 +87,30 @@ class McpBeliefStore:
                     },
                 },
             )
-            if init_resp.status_code == 200:
-                init_data = init_resp.json()
-                sid = init_resp.headers.get("Mcp-Session-Id")
-                if sid:
-                    self._session_id = sid
-                    headers["Mcp-Session-Id"] = sid
-                logger.debug("MCP session initialized: %s", init_data)
+            sid = init_headers.get("mcp-session-id") or init_headers.get("Mcp-Session-Id")
+            if sid:
+                self._session_id = sid
+                headers["Mcp-Session-Id"] = sid
+            logger.debug("MCP session initialized: %s", init_data)
 
-                # Send initialized notification
-                self._client.post(
-                    self.mcp_url,
-                    headers=headers,
-                    json={
-                        "jsonrpc": "2.0",
-                        "method": "notifications/initialized",
-                    },
-                )
+            self._client.post(
+                self.mcp_url,
+                headers=headers,
+                json={
+                    "jsonrpc": "2.0",
+                    "method": "notifications/initialized",
+                },
+            )
 
-        resp = self._client.post(
-            self.mcp_url,
-            headers=headers,
-            json={
+        data, _ = self._post(
+            headers,
+            {
                 "jsonrpc": "2.0",
                 "id": _next_id(),
                 "method": "tools/call",
                 "params": {"name": tool_name, "arguments": arguments},
             },
         )
-        resp.raise_for_status()
-        data = resp.json()
 
         if "error" in data:
             raise RuntimeError(f"MCP error: {data['error']}")
