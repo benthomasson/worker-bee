@@ -121,47 +121,49 @@ class McpBeliefStore:
         return "\n".join(texts)
 
     def search(self, query: str, limit: int = 20) -> str:
-        args = {"query": query}
+        args: dict = {"query": query}
         if self.domain_id:
-            args["domain_id"] = self.domain_id
+            args["domain"] = self.domain_id
         return self._call("search", args)
 
-    def show(self, belief_id: str) -> str:
-        args = {"belief_id": belief_id}
+    def show(self, node_id: str) -> str:
+        args: dict = {"node_id": node_id}
         if self.domain_id:
-            args["domain_id"] = self.domain_id
-        return self._call("get_belief", args)
+            args["domain"] = self.domain_id
+        return self._call("show", args)
 
-    def explain(self, belief_id: str) -> str:
-        args = {"belief_id": belief_id}
+    def explain(self, node_id: str) -> str:
+        args: dict = {"node_id": node_id}
         if self.domain_id:
-            args["domain_id"] = self.domain_id
-        return self._call("explain_belief", args)
+            args["domain"] = self.domain_id
+        return self._call("explain", args)
 
     def list_beliefs(self, truth_value: str = "IN", limit: int = 50) -> str:
-        args = {"truth_value": truth_value, "limit": limit}
+        args: dict = {}
+        if truth_value:
+            args["status"] = truth_value
         if self.domain_id:
-            args["domain_id"] = self.domain_id
-        return self._call("list_beliefs", args)
+            args["domain"] = self.domain_id
+        return self._call("list", args)
 
     def list_domains(self) -> str:
-        return self._call("list_domains", {})
+        return self._call("domains", {})
 
-    def propose_belief(self, belief_id: str, text: str, source: str = "") -> str:
-        args = {"belief_id": belief_id, "text": text}
+    def propose_belief(self, node_id: str, text: str, source: str = "") -> str:
+        args: dict = {"node_id": node_id, "text": text}
         if source:
             args["source"] = source
         if self.domain_id:
-            args["domain_id"] = self.domain_id
-        return self._call("propose_belief", args)
+            args["domain"] = self.domain_id
+        return self._call("add", args)
 
-    def propose_retraction(self, belief_id: str, reason: str = "") -> str:
-        args = {"belief_id": belief_id}
+    def propose_retraction(self, node_id: str, reason: str = "") -> str:
+        args: dict = {"node_id": node_id}
         if reason:
             args["reason"] = reason
         if self.domain_id:
-            args["domain_id"] = self.domain_id
-        return self._call("propose_retraction", args)
+            args["domain"] = self.domain_id
+        return self._call("retract", args)
 
     @property
     def has_any(self) -> bool:
