@@ -144,7 +144,7 @@ class McpBeliefStore:
             args["status"] = truth_value
         if self.domain_id:
             args["domain"] = self.domain_id
-        return self._call("list", args)
+        return self._call("list_beliefs", args)
 
     def list_domains(self) -> str:
         return self._call("domains", {})
