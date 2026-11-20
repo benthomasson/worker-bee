@@ -11,6 +11,7 @@ import glob as glob_module
 import json
 import os
 import re
+import secrets
 import shlex
 import subprocess
 import sys
@@ -577,7 +578,6 @@ class NoteStore:
     def _flush(self) -> None:
         if not self.path:
             return
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         text = "".join(json.dumps(entry, ensure_ascii=False) + "\n"
                        for entry in self._notes)
         # Atomic replace: on success the file is complete; on failure the
@@ -816,11 +816,10 @@ def _any_allowed_root(path: Path) -> Path | None:
 
 
 def _workspace_path(path: str | os.PathLike[str], *, read_only_allowed: bool = True) -> Path:
-    candidate = Path(path)
-    if candidate.is_absolute():
-        resolved = candidate.expanduser().resolve()
-    else:
-        resolved = (_workspace_root / candidate).resolve()
+    candidate = Path(path).expanduser()
+    lexical = Path(os.path.abspath(candidate if candidate.is_absolute()
+                                  else _workspace_root / candidate))
+    resolved = lexical.resolve()
     if read_only_allowed:
         if _any_allowed_root(resolved) is None:
             raise ValueError(f"path is outside workspace: {path}")
@@ -829,7 +828,9 @@ def _workspace_path(path: str | os.PathLike[str], *, read_only_allowed: bool = T
         resolved.relative_to(_workspace_root)
     except ValueError as exc:
         raise ValueError(f"path is outside workspace: {path}") from exc
-    return resolved
+    # Keep the lexical path for writes so the atomic writer can reject a
+    # symlinked component instead of silently writing through its target.
+    return lexical
 
 
 def set_belief_db(db_path: str | None, brain_path: str | None = None) -> None:
@@ -1088,9 +1089,16 @@ def _open_parent_directory(path: Path):
     missing components through the pinned descriptor also avoids the
     ``mkdir(parents=True)`` version of that race.
     """
-    if not all(hasattr(os, name) for name in ("O_DIRECTORY", "O_NOFOLLOW")):
-        path.parent.mkdir(parents=True, exist_ok=True)
-        return None, path.parent
+    required = ("O_DIRECTORY", "O_NOFOLLOW")
+    if not all(hasattr(os, name) for name in required):
+        raise OSError(
+            "safe atomic writes require O_DIRECTORY and O_NOFOLLOW support"
+        )
+    if not all(
+        operation in os.supports_dir_fd
+        for operation in (os.open, os.mkdir, os.stat, os.unlink)
+    ):
+        raise OSError("safe atomic writes require descriptor-relative filesystem operations")
     absolute = path.absolute()
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     fd = os.open(os.sep, flags)
@@ -1129,7 +1137,7 @@ def _atomic_write_text(path, text: str) -> None:
             # random exclusive name avoids following a concurrently-created
             # symlink, and replace() below uses the same directory descriptor.
             for _ in range(100):
-                candidate = f".{target}.{next(tempfile._get_candidate_names())}.tmp"
+                candidate = f".{target}.{secrets.token_hex(16)}.tmp"
                 try:
                     fd = os.open(candidate, os.O_WRONLY | os.O_CREAT |
                                   os.O_EXCL | os.O_NOFOLLOW, 0o600,

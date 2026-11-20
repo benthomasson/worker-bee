@@ -151,7 +151,6 @@ def _write_entry(summary: str, events: list[dict], entry_dir: str | Path) -> Pat
     """Write the summary as a dated entry file."""
     now = datetime.now(timezone.utc)
     date_dir = Path(entry_dir) / now.strftime("%Y/%m/%d")
-    date_dir.mkdir(parents=True, exist_ok=True)
 
     task = ""
     for ev in events:

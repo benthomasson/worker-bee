@@ -103,6 +103,21 @@ def test_write_file_creates_parent_dirs(tmp_path):
     assert (tmp_path / "a/b/c.txt").read_text() == "nested"
 
 
+def test_write_file_rejects_symlinked_parent(tmp_path):
+    tools.set_workspace_root(tmp_path)
+    real_parent = tmp_path / "real"
+    real_parent.mkdir()
+    linked = tmp_path / "linked"
+    linked.symlink_to(real_parent, target_is_directory=True)
+
+    result = tools.execute_tool(
+        "write_file", {"path": "linked/created.txt", "content": "escape"}
+    )
+
+    assert "Error writing file" in result
+    assert not (real_parent / "created.txt").exists()
+
+
 def test_edit_file_replaces_uniquely(tmp_path):
     tools.set_workspace_root(tmp_path)
     f = tmp_path / "f.txt"

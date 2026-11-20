@@ -182,6 +182,15 @@ def test_atomic_write_does_not_follow_symlinked_parent(tmp_path):
     assert not (outside / "created.txt").exists()
 
 
+def test_atomic_write_rejects_unsupported_directory_flags(tmp_path, monkeypatch):
+    monkeypatch.delattr(tools.os, "O_NOFOLLOW", raising=False)
+
+    with pytest.raises(OSError, match="O_DIRECTORY and O_NOFOLLOW"):
+        tools._atomic_write_text(tmp_path / "created.txt", "unsupported")
+
+    assert not (tmp_path / "created.txt").exists()
+
+
 def test_glob_rejects_absolute_and_parent_patterns(tmp_path):
     tools.set_workspace_root(tmp_path)
     (tmp_path / "inside.txt").write_text("inside")
