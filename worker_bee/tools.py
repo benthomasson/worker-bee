@@ -823,7 +823,9 @@ def _workspace_path(path: str | os.PathLike[str], *, read_only_allowed: bool = T
     if read_only_allowed:
         if _any_allowed_root(resolved) is None:
             raise ValueError(f"path is outside workspace: {path}")
-        return resolved
+        # Keep the lexical path so descriptor-based reads can pin each
+        # component and reject a symlink swap after this validation.
+        return lexical
     try:
         resolved.relative_to(_workspace_root)
     except ValueError as exc:
@@ -1054,7 +1056,7 @@ def _delete_note(index: int) -> str:
 def _read_file(path, offset=None, limit=None):
     try:
         path = _workspace_path(path)
-        with open(path, "r") as f:
+        with _open_file_for_read(path) as f:
             lines = f.readlines()
     except Exception as e:
         return f"Error reading file: {e}"
@@ -1080,8 +1082,8 @@ def _read_file(path, offset=None, limit=None):
     return result
 
 
-def _open_parent_directory(path: Path):
-    """Open (and, if needed, create) ``path``'s parent without symlinks.
+def _open_parent_directory(path: Path, *, create: bool = True):
+    """Open ``path``'s parent without symlinks, optionally creating it.
 
     The returned descriptor pins every parent component for the subsequent
     open/replace operation.  Resolving a path alone is not sufficient because
@@ -1115,6 +1117,8 @@ def _open_parent_directory(path: Path):
             try:
                 next_fd = os.open(component, flags, dir_fd=fd)
             except FileNotFoundError:
+                if not create:
+                    raise
                 # mkdirat operates relative to the already-pinned directory;
                 # it cannot be redirected by a symlink inserted elsewhere.
                 try:
@@ -1131,6 +1135,22 @@ def _open_parent_directory(path: Path):
     except BaseException:
         os.close(fd)
         raise
+
+
+def _open_file_for_read(path: Path):
+    """Open a validated file through a descriptor-pinned parent directory."""
+    parent_fd, target = _open_parent_directory(path, create=False)
+    fd = None
+    try:
+        flags = os.O_RDONLY | os.O_NOFOLLOW
+        fd = os.open(target, flags, dir_fd=parent_fd)
+        return os.fdopen(fd, "r")
+    except BaseException:
+        if fd is not None:
+            os.close(fd)
+        raise
+    finally:
+        os.close(parent_fd)
 
 
 def _atomic_write_text(path, text: str) -> None:
@@ -1223,7 +1243,7 @@ def _edit_file(path, old_string, new_string):
         # Edits stay confined to the workspace; read-only roots are
         # read-only by design.
         path = _workspace_path(path, read_only_allowed=False)
-        with open(path, "r") as f:
+        with _open_file_for_read(path) as f:
             content = f.read()
 
         count = content.count(old_string)

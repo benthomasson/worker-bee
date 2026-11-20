@@ -169,6 +169,31 @@ def test_workspace_symlink_cannot_escape(tmp_path):
     assert "outside workspace" in result
 
 
+def test_read_file_does_not_follow_symlinked_file_inside_workspace(tmp_path):
+    tools.set_workspace_root(tmp_path)
+    target = tmp_path / "target.txt"
+    target.write_text("secret")
+    link = tmp_path / "link.txt"
+    link.symlink_to(target)
+
+    result = tools.execute_tool("read_file", {"path": "link.txt"})
+    assert "Error reading file" in result
+
+
+def test_edit_file_does_not_follow_symlinked_file_inside_workspace(tmp_path):
+    tools.set_workspace_root(tmp_path)
+    target = tmp_path / "target.txt"
+    target.write_text("secret")
+    link = tmp_path / "link.txt"
+    link.symlink_to(target)
+
+    result = tools.execute_tool(
+        "edit_file", {"path": "link.txt", "old_string": "secret", "new_string": "changed"}
+    )
+    assert "Error editing file" in result
+    assert target.read_text() == "secret"
+
+
 def test_atomic_write_does_not_follow_symlinked_parent(tmp_path):
     """The final write must use the checked directory, not a replacement link."""
     outside = tmp_path / "outside"
