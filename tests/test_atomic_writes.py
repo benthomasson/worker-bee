@@ -42,6 +42,7 @@ def _force_rename_failure(monkeypatch):
         raise OSError("simulated disk failure")
 
     monkeypatch.setattr(os, "replace", failing_replace)
+    monkeypatch.setattr(os, "rename", failing_replace)
 
 
 # ---------------------------------------------------------------------------
@@ -74,7 +75,7 @@ def test_atomic_write_preserves_existing_permissions(tmp_path):
 
 def test_atomic_write_failure_leaves_existing_intact(tmp_path, monkeypatch):
     """If the rename fails after the temp file is written, the target file
-    must remain byte-for-byte unchanged and no temp file may be left behind."""
+    must remain byte-for-byte unchanged and no temp file must be left behind."""
     target = tmp_path / "a.txt"
     original = "original-content"
     target.write_text(original)
@@ -87,6 +88,19 @@ def test_atomic_write_failure_leaves_existing_intact(tmp_path, monkeypatch):
     names = sorted(p.name for p in tmp_path.iterdir())
     assert names == ["a.txt"], "no stray tempfiles must be left behind"
     assert target.read_text() == original, "existing file must be untouched"
+
+
+def test_atomic_write_missing_parent_cleans_up_on_replace_failure(tmp_path, monkeypatch):
+    target = tmp_path / "missing" / "nested" / "a.txt"
+    _force_rename_failure(monkeypatch)
+
+    with pytest.raises(OSError):
+        tools._atomic_write_text(target, "should-not-appear")
+
+    assert not target.exists()
+    parent = tmp_path / "missing" / "nested"
+    if parent.exists():
+        assert list(parent.iterdir()) == []
 
 
 # ---------------------------------------------------------------------------

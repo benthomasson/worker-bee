@@ -1094,11 +1094,17 @@ def _open_parent_directory(path: Path):
         raise OSError(
             "safe atomic writes require O_DIRECTORY and O_NOFOLLOW support"
         )
+    replacement_supported = (
+        os.replace in os.supports_dir_fd
+        or os.rename in os.supports_dir_fd
+    )
     if not all(
         operation in os.supports_dir_fd
-        for operation in (os.open, os.mkdir, os.stat, os.unlink)
-    ):
-        raise OSError("safe atomic writes require descriptor-relative filesystem operations")
+        for operation in (os.open, os.mkdir, os.stat, os.unlink, os.chmod)
+    ) or not replacement_supported:
+        raise OSError(
+            "safe atomic writes require descriptor-relative filesystem operations"
+        )
     absolute = path.absolute()
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     fd = os.open(os.sep, flags)
@@ -1111,7 +1117,13 @@ def _open_parent_directory(path: Path):
             except FileNotFoundError:
                 # mkdirat operates relative to the already-pinned directory;
                 # it cannot be redirected by a symlink inserted elsewhere.
-                os.mkdir(component, dir_fd=fd)
+                try:
+                    os.mkdir(component, dir_fd=fd)
+                except FileExistsError:
+                    # Another writer may have created the component between
+                    # openat and mkdirat.  Re-open it and let O_NOFOLLOW
+                    # validate what won the race.
+                    pass
                 next_fd = os.open(component, flags, dir_fd=fd)
             os.close(fd)
             fd = next_fd
@@ -1169,7 +1181,14 @@ def _atomic_write_text(path, text: str) -> None:
         if parent_fd is None:
             os.replace(tmp_name, path)
         else:
-            os.replace(tmp_name, target, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+            if os.replace in os.supports_dir_fd:
+                os.replace(
+                    tmp_name, target, src_dir_fd=parent_fd, dst_dir_fd=parent_fd
+                )
+            else:
+                os.rename(
+                    tmp_name, target, src_dir_fd=parent_fd, dst_dir_fd=parent_fd
+                )
         tmp_name = None
     finally:
         if fd is not None:

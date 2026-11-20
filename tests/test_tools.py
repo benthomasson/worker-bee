@@ -191,6 +191,18 @@ def test_atomic_write_rejects_unsupported_directory_flags(tmp_path, monkeypatch)
     assert not (tmp_path / "created.txt").exists()
 
 
+def test_atomic_write_rejects_unsupported_descriptor_operations(tmp_path, monkeypatch):
+    supported = set(tools.os.supports_dir_fd)
+    supported.discard(tools.os.replace)
+    supported.discard(tools.os.rename)
+    monkeypatch.setattr(tools.os, "supports_dir_fd", supported)
+
+    with pytest.raises(OSError, match="descriptor-relative"):
+        tools._atomic_write_text(tmp_path / "created.txt", "unsupported")
+
+    assert not (tmp_path / "created.txt").exists()
+
+
 def test_glob_rejects_absolute_and_parent_patterns(tmp_path):
     tools.set_workspace_root(tmp_path)
     (tmp_path / "inside.txt").write_text("inside")
