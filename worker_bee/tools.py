@@ -1079,40 +1079,103 @@ def _read_file(path, offset=None, limit=None):
     return result
 
 
-def _atomic_write_text(path, text: str) -> None:
-    """Write ``text`` to ``path`` atomically.
+def _open_parent_directory(path: Path):
+    """Open (and, if needed, create) ``path``'s parent without symlinks.
 
-    The content is written to a temporary file in the same directory
-    (guaranteeing the same filesystem), flushed, fsynced, then moved over
-    ``path`` with ``os.replace`` — an atomic rename on POSIX. If anything
-    fails before the rename, the existing ``path`` is left completely
-    untouched and no stale temporary file remains.
+    The returned descriptor pins every parent component for the subsequent
+    open/replace operation.  Resolving a path alone is not sufficient because
+    an attacker can replace a checked directory with a symlink.  Creating
+    missing components through the pinned descriptor also avoids the
+    ``mkdir(parents=True)`` version of that race.
     """
-    path = Path(path)
-    fd, tmp_name = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
-    )
+    if not all(hasattr(os, name) for name in ("O_DIRECTORY", "O_NOFOLLOW")):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return None, path.parent
+    absolute = path.absolute()
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    fd = os.open(os.sep, flags)
     try:
+        for component in absolute.parent.parts:
+            if component in ("", os.sep):
+                continue
+            try:
+                next_fd = os.open(component, flags, dir_fd=fd)
+            except FileNotFoundError:
+                # mkdirat operates relative to the already-pinned directory;
+                # it cannot be redirected by a symlink inserted elsewhere.
+                os.mkdir(component, dir_fd=fd)
+                next_fd = os.open(component, flags, dir_fd=fd)
+            os.close(fd)
+            fd = next_fd
+        return fd, absolute.name
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _atomic_write_text(path, text: str) -> None:
+    """Atomically write ``text`` while pinning the destination directory."""
+    path = Path(path)
+    parent_fd, target = _open_parent_directory(path)
+    tmp_name = None
+    fd = None
+    try:
+        if parent_fd is None:
+            fd, tmp_name = tempfile.mkstemp(
+                prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
+            )
+        else:
+            # Create the temporary file in the already-open directory.  A
+            # random exclusive name avoids following a concurrently-created
+            # symlink, and replace() below uses the same directory descriptor.
+            for _ in range(100):
+                candidate = f".{target}.{next(tempfile._get_candidate_names())}.tmp"
+                try:
+                    fd = os.open(candidate, os.O_WRONLY | os.O_CREAT |
+                                  os.O_EXCL | os.O_NOFOLLOW, 0o600,
+                                  dir_fd=parent_fd)
+                    tmp_name = candidate
+                    break
+                except FileExistsError:
+                    continue
+            if fd is None:
+                raise FileExistsError("could not create a temporary file")
+
         with os.fdopen(fd, "w", encoding="utf-8") as f:
+            fd = None
             f.write(text)
             f.flush()
             try:
                 os.fsync(f.fileno())
             except (OSError, ValueError):
-                pass  # not fatal on all filesystems
+                pass
         try:
-            if path.exists():
-                # Preserve the target's permissions on the replacement.
-                os.chmod(tmp_name, path.stat().st_mode & 0o777)
+            if parent_fd is None:
+                if path.exists():
+                    os.chmod(tmp_name, path.stat().st_mode & 0o777)
+            else:
+                existing = os.stat(target, dir_fd=parent_fd, follow_symlinks=False)
+                os.chmod(tmp_name, existing.st_mode & 0o777, dir_fd=parent_fd)
         except OSError:
             pass
-        os.replace(tmp_name, path)
-    except BaseException:
-        try:
-            os.unlink(tmp_name)
-        except OSError:
-            pass
-        raise
+        if parent_fd is None:
+            os.replace(tmp_name, path)
+        else:
+            os.replace(tmp_name, target, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        tmp_name = None
+    finally:
+        if fd is not None:
+            os.close(fd)
+        if tmp_name is not None:
+            try:
+                if parent_fd is None:
+                    os.unlink(tmp_name)
+                else:
+                    os.unlink(tmp_name, dir_fd=parent_fd)
+            except OSError:
+                pass
+        if parent_fd is not None:
+            os.close(parent_fd)
 
 
 def _write_file(path, content):
@@ -1120,7 +1183,8 @@ def _write_file(path, content):
         # Writes stay confined to the workspace; read-only roots are
         # read-only by design.
         path = _workspace_path(path, read_only_allowed=False)
-        path.parent.mkdir(parents=True, exist_ok=True)
+        # _atomic_write_text creates missing parents through pinned directory
+        # descriptors, avoiding a mkdir-then-use symlink replacement race.
         _atomic_write_text(path, content)
         return f"Successfully wrote to {path}"
     except Exception as e:

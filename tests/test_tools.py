@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from worker_bee import tools
 
 
@@ -165,6 +167,19 @@ def test_workspace_symlink_cannot_escape(tmp_path):
 
     result = tools.execute_tool("read_file", {"path": "link.txt"})
     assert "outside workspace" in result
+
+
+def test_atomic_write_does_not_follow_symlinked_parent(tmp_path):
+    """The final write must use the checked directory, not a replacement link."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    linked = tmp_path / "linked"
+    linked.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(OSError):
+        tools._atomic_write_text(linked / "created.txt", "must stay confined")
+
+    assert not (outside / "created.txt").exists()
 
 
 def test_glob_rejects_absolute_and_parent_patterns(tmp_path):
