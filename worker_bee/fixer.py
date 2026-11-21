@@ -21,7 +21,7 @@ Belief `{belief_id}` was verified against the source code and found to be: {stat
 - Confidence: {confidence}
 - Evidence: {evidence}
 - Comment: {comment}
-
+{gap_section}
 ## Relevant files
 {file_list}
 
@@ -51,6 +51,8 @@ def fix_belief(
     truncate_chars: int | None = None,
     ctx_limit_pct: float = 0.80,
     read_only_paths: str | Path | list[str | Path] | None = None,
+    gap: str | None = None,
+    gap_files: list[str] | None = None,
 ) -> EditSession:
     """Fix a verified issue by running a code-editing loop with full context."""
     db_path = Path(db_path)
@@ -62,7 +64,7 @@ def fix_belief(
         from worker_bee.tracer import _guess_project_dir
         project_dir = _guess_project_dir(db_path)
 
-    task = _build_fix_task(trace, verify_result, project_dir)
+    task = _build_fix_task(trace, verify_result, project_dir, gap=gap, gap_files=gap_files)
 
     if dry_run or verbose:
         print(f"\n{'='*60}", file=sys.stderr)
@@ -108,10 +110,22 @@ def _build_fix_task(
     trace: TraceResult,
     verify_result: dict,
     project_dir: Path | None,
+    *,
+    gap: str | None = None,
+    gap_files: list[str] | None = None,
 ) -> str:
     """Build the task prompt from trace and verify data."""
     verified = verify_result.get("verified")
-    if verified is True:
+    if gap:
+        status = "PARTIALLY FIXED (a prior fix addressed part of the problem)"
+        task_instruction = (
+            "A previous fix attempt addressed part of this belief but a gap remains. "
+            "Focus specifically on the remaining gap described above. "
+            "Do not redo work that is already complete. "
+            "Read the relevant files first, then make targeted edits. "
+            "Run tests after editing."
+        )
+    elif verified is True:
         status = "VERIFIED (the code supports this claim)"
         task_instruction = (
             "This belief is verified as correct. If there is still an issue "
@@ -136,8 +150,21 @@ def _build_fix_task(
             "Run tests after editing."
         )
 
-    if trace.code_found:
-        file_list = "\n".join(f"- {f}" for f in trace.code_found)
+    gap_section = ""
+    if gap:
+        gap_section = f"\n## Remaining gap (from verify-fix)\n{gap}\n"
+        if gap_files:
+            gap_section += "\n**Affected files:**\n"
+            gap_section += "\n".join(f"- {f}" for f in gap_files)
+            gap_section += "\n"
+
+    files = list(trace.code_found or [])
+    if gap_files:
+        for f in gap_files:
+            if f not in files:
+                files.append(f)
+    if files:
+        file_list = "\n".join(f"- {f}" for f in files)
     else:
         file_list = "(no code files found — explore the project to find relevant files)"
 
@@ -152,6 +179,7 @@ def _build_fix_task(
         confidence=verify_result.get("confidence", "unknown"),
         evidence=verify_result.get("evidence", "none"),
         comment=verify_result.get("comment", "none"),
+        gap_section=gap_section,
         file_list=file_list,
         source=trace.source or "unknown",
         summary_excerpt=summary_excerpt,

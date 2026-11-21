@@ -10,4 +10,3 @@ build/
 .worker-bee/
 uv.lock
 *.env
-start-worker-bee.sh

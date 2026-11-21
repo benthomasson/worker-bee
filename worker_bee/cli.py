@@ -55,6 +55,11 @@ def main(argv: list[str] | None = None) -> int:
     sub_fix.add_argument("--read-only", action="append", default=[], metavar="DIR",
                          help="Grant READ-ONLY access to a directory outside the project "
                               "(repeatable; read_file/grep/glob only — writes stay in the project)")
+    sub_fix.add_argument("--gap", default=None,
+                         help="Description of remaining gap from a PARTIAL verify-fix result "
+                              "(focuses the fixer on what still needs fixing)")
+    sub_fix.add_argument("--gap-files", action="append", default=[], metavar="FILE",
+                         help="Files affected by the remaining gap (repeatable)")
 
     sub_edit = subparsers.add_parser("edit", help="Run a code-editing loop with tool use")
     sub_edit.add_argument("task", help="Description of the editing task")
@@ -225,6 +230,8 @@ def main(argv: list[str] | None = None) -> int:
                 truncate_chars=args.truncate_chars,
                 ctx_limit_pct=args.ctx_limit_pct,
                 read_only_paths=args.read_only,
+                gap=args.gap,
+                gap_files=args.gap_files or None,
             )
         except ValueError as e:
             print(f"Error: {e}", file=sys.stderr)
