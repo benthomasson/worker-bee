@@ -11,3 +11,4 @@ build/
 uv.lock
 *.env
 reviews/
+costs/
