@@ -285,6 +285,8 @@ print(d.get('reason', ''))
 " "$VERIFY_JSON" 2>/dev/null)
 
 Squashed $COMMIT_COUNT commit(s) from $BRANCH.
+
+Co-Authored-By: Worker Bee 🐝 <$MODEL>
 EOF
 )"
         git branch -D "$BRANCH"
