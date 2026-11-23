@@ -56,6 +56,7 @@ MODEL_COMMANDS = {
 
 _langfuse_handler = None
 _langfuse_checked = False
+_langfuse_lock = threading.Lock()
 
 _cost_lock = threading.Lock()
 _last_usage: ContextVar[dict[str, int]] = ContextVar(
@@ -161,15 +162,13 @@ def _parse_cli_json(output: str, model: str) -> str:
 
 def _get_langfuse_handler():
     global _langfuse_handler, _langfuse_checked
-    if _langfuse_checked:
+    with _langfuse_lock:
+        if _langfuse_checked:
+            return _langfuse_handler
+        if _HAS_LANGFUSE and os.environ.get("LANGFUSE_PUBLIC_KEY"):
+            _langfuse_handler = LangfuseCallbackHandler()
+        _langfuse_checked = True
         return _langfuse_handler
-    _langfuse_checked = True
-    if not _HAS_LANGFUSE:
-        return None
-    if not os.environ.get("LANGFUSE_PUBLIC_KEY"):
-        return None
-    _langfuse_handler = LangfuseCallbackHandler()
-    return _langfuse_handler
 
 
 def resolve_model_cmd(model: str) -> list[str]:
