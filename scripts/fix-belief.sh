@@ -63,6 +63,19 @@ log() { echo ""; echo "═══════════════════
 step() { echo "── $* ──"; }
 fail() { echo "FAILED: $*" >&2; exit 1; }
 
+model_email() {
+    local model="$1"
+    case "$model" in
+        openai:*)   echo "noreply@openai.com" ;;
+        claude*|anthropic:*|api:*) echo "noreply@anthropic.com" ;;
+        ollama:*)   echo "noreply@ollama.com" ;;
+        gemini:*|google:*) echo "noreply@google.com" ;;
+        mistral:*)  echo "noreply@mistral.ai" ;;
+        cohere:*)   echo "noreply@cohere.com" ;;
+        *)          echo "noreply@worker-bee" ;;
+    esac
+}
+
 abandon_branch() {
     local msg="$1"
     cd "$REPO"
@@ -286,7 +299,7 @@ print(d.get('reason', ''))
 
 Squashed $COMMIT_COUNT commit(s) from $BRANCH.
 
-Co-Authored-By: Worker Bee 🐝 <$MODEL>
+Co-authored-by: worker-bee 🐝 $MODEL <$(model_email "$MODEL")>
 EOF
 )"
         git branch -D "$BRANCH"
