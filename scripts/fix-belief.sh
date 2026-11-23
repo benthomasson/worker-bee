@@ -22,6 +22,7 @@ MAX_VERIFY_ROUNDS=3
 DB=~/git/worker-bee-expert/reasons.db
 REPO=~/git/worker-bee
 MAX_TURNS=1000
+NUM_CTX=65536
 
 # ── parse arguments ───────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -32,6 +33,7 @@ while [[ $# -gt 0 ]]; do
         --db) DB="$2"; shift 2 ;;
         --repo) REPO="$2"; shift 2 ;;
         --max-turns) MAX_TURNS="$2"; shift 2 ;;
+        --num-ctx) NUM_CTX="$2"; shift 2 ;;
         -*)
             echo "Unknown option: $1" >&2
             exit 1
@@ -138,7 +140,8 @@ cd "$REPO"
 uv run worker-bee fix "$DB" "$BELIEF_ID" \
     --project-dir "$REPO" \
     --model "$MODEL" \
-    --max-turns "$MAX_TURNS" 2>&1 || true
+    --max-turns "$MAX_TURNS" \
+    --num-ctx "$NUM_CTX" 2>&1 || true
 
 if ! has_changes; then
     fail "worker-bee fix made no changes"
@@ -213,7 +216,8 @@ $(cat "$REPORT")
         uv run worker-bee edit "$TASK" \
             --db "$DB" \
             --model "$MODEL" \
-            --max-turns "$MAX_TURNS" 2>&1 || true
+            --max-turns "$MAX_TURNS" \
+            --num-ctx "$NUM_CTX" 2>&1 || true
 
         if has_changes; then
             commit_changes "review fixes #$review_round for $BELIEF_ID"
@@ -290,6 +294,7 @@ for f in d.get('affected_files', []):
             --project-dir "$REPO" \
             --model "$MODEL" \
             --max-turns "$MAX_TURNS" \
+            --num-ctx "$NUM_CTX" \
             --gap "$GAP_DESC" \
             "${GAP_FILES_ARGS[@]}" \
             2>&1 || true

@@ -221,6 +221,14 @@ def _resolve_ref(ref: str, project_dir: Path | None, summary_dir: Path) -> Path 
         candidate = project_dir / ref.lstrip("./")
         if candidate.exists():
             return candidate
+        if "/" not in ref:
+            matches = [
+                m for m in project_dir.rglob(ref)
+                if not any(p.name.startswith(".") or p.name == "node_modules"
+                           for p in m.relative_to(project_dir).parents)
+            ]
+            if len(matches) == 1:
+                return matches[0]
 
     candidate = summary_dir / ref
     if candidate.exists():
