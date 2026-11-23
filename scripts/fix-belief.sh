@@ -287,7 +287,7 @@ print(d.get('reason', ''))
 Squashed $COMMIT_COUNT commit(s) from $BRANCH.
 EOF
 )"
-        git branch -d "$BRANCH"
+        git branch -D "$BRANCH"
         echo "Merged to main and deleted $BRANCH."
         exit 0
     fi
