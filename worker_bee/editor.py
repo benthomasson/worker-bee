@@ -128,6 +128,9 @@ class EditSession:
 
 
 LOG_DIR = Path(".worker-bee/logs")
+# Version for the schema of each session-log record.  Keep this explicit so
+# readers can handle future record-shape changes without inferring from events.
+LOG_SCHEMA_VERSION = 1
 
 
 class SessionMemory:
@@ -648,6 +651,9 @@ def _log_event(log: dict, event: str, **data) -> None:
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "event": event,
         **data,
+        # Keep the version authoritative even if event payloads contain a
+        # similarly named key.
+        "schema_version": LOG_SCHEMA_VERSION,
     }
     f = log.get("file")
     if f and not f.closed:

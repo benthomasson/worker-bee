@@ -1,8 +1,24 @@
 """Tests for edit-session logging."""
 
+import json
 from datetime import datetime as real_datetime
 
 from worker_bee import editor
+
+
+def test_log_records_include_schema_version(tmp_path):
+    log = editor._init_log(tmp_path, "task", "model", False)
+    try:
+        editor._log_event(log, "test_event", detail="value")
+        editor._log_event(log, "override_attempt", schema_version=999)
+        records = [json.loads(line) for line in log["path"].read_text().splitlines()]
+        assert len(records) == 3
+        assert all(record["schema_version"] == 1 for record in records)
+        assert records[0]["event"] == "session_start"
+        assert records[1]["event"] == "test_event"
+        assert records[2]["event"] == "override_attempt"
+    finally:
+        log["file"].close()
 
 
 def test_init_log_allocates_distinct_files_for_same_timestamp(tmp_path, monkeypatch):
