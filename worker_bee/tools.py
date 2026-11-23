@@ -1385,7 +1385,18 @@ def _validate_special_command(argv):
         # (including staging and committing its own changes).  Network,
         # checkout, config, and other operations that can alter or escape the
         # workspace remain rejected.
-        subcommand = next((arg for arg in args if not arg.startswith("-")), None)
+        # Skip global options that take a value argument (-C <path>, -c <key=val>)
+        skip_next = False
+        git_args = []
+        for arg in args:
+            if skip_next:
+                skip_next = False
+                continue
+            if arg in ("-C", "-c"):
+                skip_next = True
+                continue
+            git_args.append(arg)
+        subcommand = next((arg for arg in git_args if not arg.startswith("-")), None)
         read_only = {"branch", "diff", "grep", "log", "ls-files", "rev-parse", "show", "status"}
         if subcommand == "add":
             add_args = [arg for arg in args[1:] if not arg.startswith("-")]
@@ -1496,11 +1507,15 @@ def _run_command(command):
             # Permit the project's test runner as a module, but do not let
             # -m become a general arbitrary-module launcher.
             index = argv.index("-m")
-            if index + 1 >= len(argv) or argv[index + 1] != "pytest":
+            module = argv[index + 1] if index + 1 < len(argv) else None
+            if module == "pytest":
+                error = _check_pytest_paths(argv[index + 2:])
+                if error:
+                    return error
+            elif module in ("py_compile", "compileall"):
+                path_args = {i for i in range(index + 2, len(argv)) if not argv[i].startswith("-")}
+            else:
                 return "Error: python -m arbitrary module execution is not allowed"
-            error = _check_pytest_paths(argv[index + 2:])
-            if error:
-                return error
         else:
             path_args = {i for i, arg in enumerate(argv[1:], 1) if not arg.startswith("-")}
 
