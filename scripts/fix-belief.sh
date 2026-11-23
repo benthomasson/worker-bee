@@ -63,6 +63,16 @@ log() { echo ""; echo "═══════════════════
 step() { echo "── $* ──"; }
 fail() { echo "FAILED: $*" >&2; exit 1; }
 
+abandon_branch() {
+    local msg="$1"
+    cd "$REPO"
+    if has_changes; then
+        commit_changes "FAILED: $msg"
+    fi
+    git checkout main
+    echo "Returned to main. Fix branch $BRANCH preserved for inspection."
+}
+
 BRANCH="fix-${BELIEF_ID}"
 BASE_COMMIT=""
 
@@ -144,7 +154,8 @@ uv run worker-bee fix "$DB" "$BELIEF_ID" \
     --num-ctx "$NUM_CTX" 2>&1 || true
 
 if ! has_changes; then
-    fail "worker-bee fix made no changes"
+    abandon_branch "worker-bee fix made no changes for $BELIEF_ID"
+    exit 1
 fi
 
 commit_changes "fix $BELIEF_ID"
@@ -258,6 +269,26 @@ d = json.load(open(sys.argv[1]))
 print(f\"  Verdict: {d['verdict']}\")
 print(f\"  Reason: {d['reason']}\")
 " "$VERIFY_JSON" || true
+
+        step "Squash-merging $BRANCH into main"
+        cd "$REPO"
+        COMMIT_COUNT=$(git rev-list --count main.."$BRANCH")
+        git checkout main
+        git merge --squash "$BRANCH"
+        git commit -m "$(cat <<EOF
+Fix $BELIEF_ID
+
+$(python3 -c "
+import json, sys
+d = json.load(open(sys.argv[1]))
+print(d.get('reason', ''))
+" "$VERIFY_JSON" 2>/dev/null)
+
+Squashed $COMMIT_COUNT commit(s) from $BRANCH.
+EOF
+)"
+        git branch -d "$BRANCH"
+        echo "Merged to main and deleted $BRANCH."
         exit 0
     fi
 
@@ -265,6 +296,7 @@ print(f\"  Reason: {d['reason']}\")
         if [[ "$verify_round" -eq "$MAX_VERIFY_ROUNDS" ]]; then
             log "PARTIAL after $MAX_VERIFY_ROUNDS verify rounds — stopping"
             python3 -c "import json,sys; print(json.dumps(json.load(open(sys.argv[1])),indent=2))" "$VERIFY_JSON" || true
+            abandon_branch "PARTIAL after $MAX_VERIFY_ROUNDS verify rounds for $BELIEF_ID"
             exit 1
         fi
 
@@ -311,8 +343,10 @@ for f in d.get('affected_files', []):
     # Neither FIXED nor PARTIAL
     log "verify-fix did not return FIXED or PARTIAL"
     echo "$VERIFY_FIX_OUTPUT"
+    abandon_branch "verify-fix returned $VERDICT for $BELIEF_ID"
     exit 1
 done
 
 log "Exhausted all verify rounds without full fix"
+abandon_branch "exhausted $MAX_VERIFY_ROUNDS verify rounds for $BELIEF_ID"
 exit 1
