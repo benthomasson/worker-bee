@@ -73,8 +73,10 @@ has_changes() {
 commit_changes() {
     local msg="$1"
     cd "$REPO"
-    git add -A
-    git commit -m "$msg" --allow-empty-message || true
+    # Only stage source and test files — skip generated artifacts (reviews/, costs/, etc.)
+    git add worker_bee/ tests/ .gitignore pyproject.toml 2>/dev/null || true
+    git diff --cached --quiet && return 0
+    git commit -m "$msg" || true
 }
 
 latest_review_dir() {
@@ -148,6 +150,7 @@ for verify_round in $(seq 1 "$MAX_VERIFY_ROUNDS"); do
             --model "$MODEL" \
             --base main \
             --branch "$BRANCH" \
+            --fixing-belief "$BELIEF_ID" \
             2>&1 || REVIEW_EXIT=$?
 
         # Exit codes: 0=PASS, 1=CONCERN, 2=BLOCK
