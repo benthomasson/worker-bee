@@ -44,3 +44,28 @@ def test_init_log_retries_existing_timestamp_file(tmp_path, monkeypatch):
         assert "existing" not in log["path"].read_text()
     finally:
         log["file"].close()
+
+
+def test_init_log_runs_retention_before_creating_session(tmp_path, monkeypatch):
+    old = tmp_path / "old.jsonl"
+    old.write_text("old")
+    import os
+    os.utime(old, (0, 0))
+    monkeypatch.setattr(editor, "cleanup_logs", lambda path: old.unlink() or [old])
+
+    log = editor._init_log(tmp_path, "task", "model", False)
+    try:
+        assert not old.exists()
+        assert log["path"].exists()
+    finally:
+        log["file"].close()
+
+
+def test_init_log_survives_retention_failure(tmp_path, monkeypatch):
+    def fail(_path):
+        raise OSError("cleanup race")
+
+    monkeypatch.setattr(editor, "cleanup_logs", fail)
+    log = editor._init_log(tmp_path, "task", "model", False)
+    log["file"].close()
+    assert log["path"].exists()

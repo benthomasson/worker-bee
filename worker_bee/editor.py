@@ -24,6 +24,7 @@ from worker_bee.tools import (
     set_workspace_root,
 )
 from worker_bee.llm import TextBlock, ToolUseBlock, format_cost_summary
+from worker_bee.log_retention import cleanup_logs
 
 MAX_TURNS = 20
 
@@ -610,6 +611,12 @@ def _init_log(log_dir: str | Path, task: str, model: str, dry_run: bool) -> dict
     """Create a session log file and return the log handle."""
     log_dir = Path(log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        cleanup_logs(log_dir)
+    except OSError:
+        # Retention is best-effort and must not prevent a new session from
+        # starting if the directory changes during cleanup.
+        pass
 
     now = datetime.now(timezone.utc)
     timestamp = now.strftime("%Y%m%d-%H%M%S-%f")
