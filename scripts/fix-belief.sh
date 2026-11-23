@@ -111,7 +111,7 @@ if echo "$VERIFY_OUTPUT" | grep -q "NOT VERIFIED"; then
     if [[ "$CONFIDENCE" == "high" ]]; then
         step "Auto-retracting belief (high confidence)"
         EVIDENCE=$(echo "$VERIFY_OUTPUT" | grep "Evidence:" | head -1 | sed 's/.*Evidence: //')
-        reasonsforge retract "$BELIEF_ID" \
+        reasonsforge --db "$DB" retract "$BELIEF_ID" \
             --reason "Auto-retracted: NOT VERIFIED (high). ${EVIDENCE}" \
             2>&1 || true
     else
