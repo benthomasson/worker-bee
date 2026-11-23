@@ -19,6 +19,7 @@ from worker_bee.tools import (
     NoteStore,
     ToolResult,
     execute_tool,
+    get_notes_store,
     set_belief_db,
     set_notes_file,
     set_read_only_paths,
@@ -154,6 +155,11 @@ class SessionMemory:
         )
         self.notes_store = notes_store
 
+    def refresh_notes(self) -> None:
+        """Refresh the in-memory note mirror from the persistent store."""
+        if self.notes_store is not None and self.notes_store.enabled:
+            self._notes = [entry["note"] for entry in self.notes_store.list()]
+
     def record_tool_call(self, turn: int, name: str, tool_input: dict, result: str) -> int:
         entry_id = len(self._tool_calls)
         summary = self._summarize_call(name, tool_input)
@@ -205,7 +211,7 @@ class SessionMemory:
                     f"({len(self._notes)} total)",
                     ok=False,
                 )
-            self._notes.append(note)
+            self.refresh_notes()
             return f"Note saved. ({idx + 1} total) [persisted to {self.notes_store.path}]"
         self._notes.append(note)
         return f"Note saved. ({len(self._notes)} total)"
@@ -279,8 +285,8 @@ def run_edit_loop(
     session_started = time.monotonic()
     set_workspace_root(workspace_root)
     set_read_only_paths(read_only_paths)
-    notes_store = NoteStore(path=DEFAULT_NOTES_PATH)
     set_notes_file(DEFAULT_NOTES_PATH)
+    notes_store = get_notes_store()
     memory = SessionMemory(notes_store=notes_store)
     prefix = system_prefix if system_prefix is not None else EDITOR_SYSTEM_PREFIX
     if entry_dir:
@@ -440,6 +446,7 @@ def run_edit_loop(
                 result_text = memory.add_note(block.input.get("note", ""))
             elif block.name in ("list_notes", "update_note", "delete_note"):
                 result_text = execute_tool(block.name, block.input)
+                memory.refresh_notes()
             elif dry_run:
                 result_text = "(dry-run: tool not executed)"
             elif confirm:

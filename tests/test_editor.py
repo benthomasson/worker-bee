@@ -6,6 +6,7 @@ from pathlib import Path
 
 from worker_bee import editor
 from worker_bee.llm import ChatResponse, TextBlock, ToolUseBlock
+from worker_bee.tools import execute_tool, set_notes_file
 
 
 class _FailingNotesStore:
@@ -41,6 +42,70 @@ def test_note_persistence_failure_has_failure_status():
     assert isinstance(result, str)
     assert result.ok is False
     assert "persistence error" in result
+
+
+def test_session_memory_refreshes_after_note_mutations(tmp_path):
+    set_notes_file(str(tmp_path / "notes.jsonl"))
+    try:
+        store = editor.get_notes_store()
+        store.add("first")
+        store.add("second")
+        memory = editor.SessionMemory(notes_store=store)
+
+        execute_tool("update_note", {"index": 0, "note": "updated"})
+        memory.refresh_notes()
+        assert memory._notes == ["updated", "second"]
+
+        execute_tool("delete_note", {"index": 0})
+        memory.refresh_notes()
+        assert memory._notes == ["second"]
+        assert "second" in memory.list_calls()
+        assert "updated" not in memory.list_calls()
+    finally:
+        set_notes_file(None)
+
+
+def test_run_edit_loop_refreshes_memory_after_note_mutation(tmp_path, monkeypatch):
+    notes_path = tmp_path / "notes.jsonl"
+    set_notes_file(str(notes_path))
+    try:
+        editor.get_notes_store().add("before")
+        monkeypatch.setattr(editor, "DEFAULT_NOTES_PATH", str(notes_path))
+        responses = iter([
+            ChatResponse(
+                content=[ToolUseBlock(
+                    "tool-1", "update_note", {"index": 0, "note": "after"},
+                )],
+                stop_reason="tool_use",
+            ),
+            ChatResponse(
+                content=[ToolUseBlock("tool-2", "list_memory", {})],
+                stop_reason="tool_use",
+            ),
+            ChatResponse(content=[TextBlock("done")], stop_reason="end_turn"),
+        ])
+
+        def fake_dispatch(messages, **kwargs):
+            return next(responses)
+
+        monkeypatch.setattr(editor, "dispatch_chat", fake_dispatch)
+        session = editor.run_edit_loop(
+            "test", model="test", max_turns=3, log_dir=tmp_path,
+            workspace_root=tmp_path,
+        )
+
+        assert session.completed is True
+        memory_results = [
+            step.tool_result for step in session.steps
+            if step.role == "tool" and step.tool_name == "list_memory"
+        ]
+        assert len(memory_results) == 1
+        memory_result = memory_results[0]
+        assert memory_result is not None
+        assert "[0] after" in memory_result
+        assert "before" not in memory_result
+    finally:
+        set_notes_file(None)
 
 
 def test_tool_result_event_records_explicit_status(tmp_path):
