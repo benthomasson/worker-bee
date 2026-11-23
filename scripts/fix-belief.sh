@@ -92,9 +92,21 @@ VERIFY_OUTPUT=$(cd "$REPO" && uv run worker-bee verify "$DB" "$BELIEF_ID" \
 echo "$VERIFY_OUTPUT"
 
 if echo "$VERIFY_OUTPUT" | grep -q "NOT VERIFIED"; then
+    CONFIDENCE=$(echo "$VERIFY_OUTPUT" | grep -o "confidence: [a-z]*" | head -1 | cut -d' ' -f2)
     echo ""
-    echo "Belief is NOT VERIFIED (already contradicted by the code)."
-    echo "No fix needed — consider retracting it."
+    echo "Belief is NOT VERIFIED (confidence: ${CONFIDENCE:-unknown})."
+
+    if [[ "$CONFIDENCE" == "high" ]]; then
+        step "Auto-retracting belief (high confidence)"
+        EVIDENCE=$(echo "$VERIFY_OUTPUT" | grep "Evidence:" | head -1 | sed 's/.*Evidence: //')
+        reasonsforge retract "$BELIEF_ID" \
+            --reason "Auto-retracted: NOT VERIFIED (high). ${EVIDENCE}" \
+            2>&1 || true
+    else
+        echo "Confidence is not high — skipping auto-retraction."
+        echo "To retract manually: reasonsforge retract $BELIEF_ID"
+    fi
+
     exit 0
 fi
 
