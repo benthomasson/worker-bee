@@ -5,6 +5,62 @@ import pytest
 from worker_bee import tools
 
 
+def test_execute_tool_exposes_status_without_breaking_string_contract(tmp_path):
+    tools.set_workspace_root(tmp_path)
+    success = tools.execute_tool("run_command", {"command": "pwd"})
+    failure = tools.execute_tool("run_command", {"command": "not-allowlisted"})
+
+    assert isinstance(success, str)
+    assert success.ok is True
+    assert success.error is None
+    assert failure.ok is False
+    assert failure.error == str(failure)
+
+
+def test_execute_tool_classifies_unknown_and_non_prefix_failures(tmp_path):
+    tools.set_workspace_root(tmp_path)
+
+    unknown = tools.execute_tool("missing_tool", {})
+    invalid_regex = tools.execute_tool("grep", {"pattern": "["})
+    nonzero = tools.execute_tool("run_command", {"command": "git status"})
+
+    assert unknown == "Unknown tool: missing_tool"
+    assert unknown.ok is False
+    assert invalid_regex.ok is False
+    assert nonzero.ok is False
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "rendering"),
+    [
+        ("show_belief", "Belief 'missing' not found"),
+        ("retract_belief", "Error: belief 'missing' not found"),
+        ("supersede_belief", "Error: belief 'missing' not found"),
+        ("propose_retraction", "Belief 'missing' not found"),
+        ("propose_supersede", "Belief 'missing' not found"),
+    ],
+)
+def test_belief_missing_id_renderings_are_failures(tool_name, rendering):
+    result = tools._as_tool_result(rendering, tool_name=tool_name)
+
+    assert result.ok is False
+    assert result.error == rendering
+
+
+def test_execute_tool_classifies_mcp_failure(monkeypatch):
+    class FakeMCP:
+        def show(self, _belief_id):
+            raise RuntimeError("backend unavailable")
+
+        mcp_url = "http://example.invalid"
+
+    monkeypatch.setattr("worker_bee.mcp_beliefs.get_mcp_store", lambda: FakeMCP())
+    result = tools.execute_tool("show_belief", {"id": "example"})
+
+    assert result.ok is False
+    assert "Error (MCP): backend unavailable" == result
+
+
 def test_filesystem_tools_are_confined(tmp_path):
     tools.set_workspace_root(tmp_path)
     outside = tmp_path.parent / "outside.txt"

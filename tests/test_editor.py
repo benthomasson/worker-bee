@@ -2,8 +2,21 @@
 
 import json
 from datetime import datetime as real_datetime
+from pathlib import Path
 
 from worker_bee import editor
+from worker_bee.llm import ChatResponse, TextBlock, ToolUseBlock
+
+
+class _FailingNotesStore:
+    enabled = True
+    path = "notes.jsonl"
+
+    def list(self):
+        return []
+
+    def add(self, _note):
+        raise OSError("disk full")
 
 
 def test_log_records_include_schema_version(tmp_path):
@@ -19,6 +32,65 @@ def test_log_records_include_schema_version(tmp_path):
         assert records[2]["event"] == "override_attempt"
     finally:
         log["file"].close()
+
+
+def test_note_persistence_failure_has_failure_status():
+    memory = editor.SessionMemory(notes_store=_FailingNotesStore())
+    result = memory.add_note("keep this note")
+
+    assert isinstance(result, str)
+    assert result.ok is False
+    assert "persistence error" in result
+
+
+def test_tool_result_event_records_explicit_status(tmp_path):
+    log = editor._init_log(tmp_path, "task", "model", False)
+    try:
+        result = editor.ToolResult("Error: failed", ok=False)
+        editor._log_event(log, "tool_result", tool="read_file", result=result,
+                          ok=result.ok)
+        log["file"].flush()
+        record = json.loads(log["path"].read_text().splitlines()[-1])
+        assert record["result"] == "Error: failed"
+        assert record["ok"] is False
+    finally:
+        log["file"].close()
+
+
+def test_run_edit_loop_returns_failed_tool_result_and_logs_status(tmp_path, monkeypatch):
+    calls = []
+    responses = iter([
+        ChatResponse(
+            content=[ToolUseBlock("tool-1", "read_file", {"path": "missing.txt"})],
+            stop_reason="tool_use",
+        ),
+        ChatResponse(content=[TextBlock("done")], stop_reason="end_turn"),
+    ])
+
+    def fake_dispatch(messages, **kwargs):
+        calls.append(messages)
+        return next(responses)
+
+    monkeypatch.setattr(editor, "dispatch_chat", fake_dispatch)
+    session = editor.run_edit_loop(
+        "test", model="test", max_turns=2, log_dir=tmp_path,
+        workspace_root=tmp_path,
+    )
+
+    assert session.completed is True
+    assert len(calls) == 2
+    tool_message = calls[1][-1]
+    assert tool_message["role"] == "user"
+    result = tool_message["content"][0]
+    assert result["content"].startswith("Error reading file:")
+    log_records = [
+        json.loads(line)
+        for line in Path(session.log_path).read_text().splitlines()
+    ]
+    tool_events = [record for record in log_records if record["event"] == "tool_result"]
+    assert len(tool_events) == 1
+    assert tool_events[0]["ok"] is False
+    assert tool_events[0]["result"].startswith("Error reading file:")
 
 
 def test_init_log_allocates_distinct_files_for_same_timestamp(tmp_path, monkeypatch):

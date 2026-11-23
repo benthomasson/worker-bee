@@ -891,8 +891,45 @@ def _execute_mcp_belief_tool(mcp, name: str, tool_input: dict) -> str:
         return f"Error (MCP): {e}"
 
 
-def execute_tool(name: str, tool_input: dict) -> str:
-    """Execute a tool by name. Returns the result as a string."""
+class ToolResult(str):
+    """String-compatible tool output with explicit execution status.
+
+    The string value remains the rendering sent to the model and preserves the
+    existing public contract.  ``error`` is derived at this boundary only for
+    legacy helpers that still render failures as ``Error: ...`` text.
+    """
+
+    def __new__(cls, text: str, *, ok: bool = True) -> "ToolResult":
+        value = super().__new__(cls, text)
+        value.ok = ok
+        value.error = None if ok else text
+        return value
+
+
+def _as_tool_result(result: str, *, tool_name: str | None = None) -> ToolResult:
+    if isinstance(result, ToolResult):
+        return result
+
+    # Helpers still return their established rendered strings, so classify the
+    # finite set of failure renderings here rather than making callers parse
+    # the output.  The name is needed for outcomes whose text is also valid
+    # prose (for example a command's non-zero exit output).
+    failed = (
+        result.startswith(("Error", "ERROR"))
+        or result.startswith("Invalid regex:")
+        or result.startswith("Unknown tool:")
+        or result.startswith("Unknown MCP belief tool:")
+        or (tool_name in {
+                "show_belief", "retract_belief", "supersede_belief",
+                "propose_retraction", "propose_supersede",
+            } and "not found" in result.lower())
+        or (tool_name == "run_command" and "(exit code:" in result)
+    )
+    return ToolResult(result, ok=not failed)
+
+
+def _execute_tool(name: str, tool_input: dict) -> str:
+    """Execute a tool by name and return its legacy string rendering."""
     # Route belief tools through MCP when an MCP store is active
     from .mcp_beliefs import get_mcp_store
     mcp = get_mcp_store()
@@ -961,6 +998,11 @@ def execute_tool(name: str, tool_input: dict) -> str:
         return _delete_note(tool_input.get("index", -1))
     else:
         return f"Unknown tool: {name}"
+
+
+def execute_tool(name: str, tool_input: dict) -> ToolResult:
+    """Execute a tool with a string-compatible, explicitly classified result."""
+    return _as_tool_result(_execute_tool(name, tool_input), tool_name=name)
 
 
 # ---------------------------------------------------------------------------

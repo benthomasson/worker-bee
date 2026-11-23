@@ -17,6 +17,7 @@ from worker_bee.tools import (
     CHAT_TOOLS,
     DEFAULT_NOTES_PATH,
     NoteStore,
+    ToolResult,
     execute_tool,
     set_belief_db,
     set_notes_file,
@@ -196,10 +197,14 @@ class SessionMemory:
             try:
                 idx = self.notes_store.add(note)
             except Exception as e:
-                # Fall back to in-memory only rather than losing the note.
+                # Fall back to in-memory only rather than losing the note, but
+                # expose the persistence failure to the editor status/logging.
                 self._notes.append(note)
-                return f"Note saved in-memory only (persistence error: {e}). " \
-                       f"({len(self._notes)} total)"
+                return ToolResult(
+                    f"Note saved in-memory only (persistence error: {e}). "
+                    f"({len(self._notes)} total)",
+                    ok=False,
+                )
             self._notes.append(note)
             return f"Note saved. ({idx + 1} total) [persisted to {self.notes_store.path}]"
         self._notes.append(note)
@@ -459,6 +464,11 @@ def run_edit_loop(
                     result_text = "(interrupted by user)"
                     abort = True
 
+            # Tool implementations expose a string-compatible result, while
+            # retaining status separately so logs and callers need not parse
+            # rendered prose.
+            if not isinstance(result_text, ToolResult):
+                result_text = ToolResult(result_text)
             if block.name not in ("list_memory", "retrieve_memory", "write_note",
                                   "list_notes", "update_note", "delete_note",
                                   "ask_user_question"):
@@ -468,7 +478,8 @@ def run_edit_loop(
                 _print_tool_result_verbose(block.name, result_text, turn)
 
             _log_event(log, "tool_result", turn=turn,
-                       tool=block.name, result=result_text)
+                       tool=block.name, result=result_text,
+                       ok=result_text.ok)
             session.steps.append(EditStep(
                 turn=turn, role="tool",
                 tool_name=block.name, tool_result=result_text,
