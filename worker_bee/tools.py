@@ -1000,9 +1000,102 @@ def _execute_tool(name: str, tool_input: dict) -> str:
         return f"Unknown tool: {name}"
 
 
-def execute_tool(name: str, tool_input: dict) -> ToolResult:
-    """Execute a tool with a string-compatible, explicitly classified result."""
-    return _as_tool_result(_execute_tool(name, tool_input), tool_name=name)
+def _tool_schemas() -> dict[str, dict]:
+    """Return the schemas used to validate inputs received from the model.
+
+    Tool names are the registry's dispatch keys.  Do not silently choose one
+    schema when two registries advertise the same key: that would make the
+    validation contract depend on registry ordering.
+    """
+    schemas: dict[str, dict] = {}
+    for tool in (*TOOLS, *CHAT_TOOLS, *BELIEF_TOOLS):
+        name = tool["name"]
+        if name in schemas:
+            raise ValueError(f"duplicate tool name in registries: {name}")
+        schemas[name] = tool["input_schema"]
+    return schemas
+
+
+def _validate_schema_value(value: object, schema: dict, field: str) -> str | None:
+    """Validate the tool registry's supported JSON Schema subset.
+
+    Supported keywords are ``type`` (string, integer, number, boolean, object,
+    and array), ``required``, ``properties``, ``items``, ``enum``,
+    ``minimum``, and ``maximum``.  This is deliberately a small, explicit
+    subset matching the schemas currently advertised by the registries; it is
+    not a general JSON Schema implementation.  Unknown object properties are
+    permitted because the registry does not set ``additionalProperties`` to
+    false.
+    """
+    expected = schema.get("type")
+    type_checks = {
+        "string": lambda v: isinstance(v, str),
+        "integer": lambda v: isinstance(v, int) and not isinstance(v, bool),
+        "number": lambda v: isinstance(v, (int, float)) and not isinstance(v, bool),
+        "boolean": lambda v: isinstance(v, bool),
+        "object": lambda v: isinstance(v, dict),
+        "array": lambda v: isinstance(v, list),
+    }
+    check = type_checks.get(expected)
+    if check is not None and not check(value):
+        return f"field '{field}' must be {expected}"
+    if "enum" in schema and value not in schema["enum"]:
+        return f"field '{field}' must be one of: {', '.join(map(str, schema['enum']))}"
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if "minimum" in schema and value < schema["minimum"]:
+            return f"field '{field}' must be at least {schema['minimum']}"
+        if "maximum" in schema and value > schema["maximum"]:
+            return f"field '{field}' must be at most {schema['maximum']}"
+    if isinstance(value, dict):
+        missing = [key for key in schema.get("required", []) if key not in value]
+        if missing:
+            return f"field '{field}' is missing required field(s): {', '.join(missing)}"
+        for key, property_schema in schema.get("properties", {}).items():
+            if key in value:
+                error = _validate_schema_value(value[key], property_schema, f"{field}.{key}")
+                if error:
+                    return error
+    if isinstance(value, list) and "items" in schema:
+        for index, item in enumerate(value):
+            error = _validate_schema_value(item, schema["items"], f"{field}[{index}]")
+            if error:
+                return error
+    return None
+
+
+def _validate_tool_input(name: str, tool_input: object) -> str | None:
+    """Return a concise validation error, or ``None`` for valid input."""
+    schema = _tool_schemas().get(name)
+    if schema is None:
+        return None
+    if not isinstance(tool_input, dict):
+        return "input must be an object"
+    missing = [key for key in schema.get("required", []) if key not in tool_input]
+    if missing:
+        return "missing required field(s): " + ", ".join(missing)
+    for key, value in tool_input.items():
+        property_schema = schema.get("properties", {}).get(key)
+        if property_schema is not None:
+            error = _validate_schema_value(value, property_schema, key)
+            if error:
+                return error
+    return None
+
+
+def execute_tool(name: str, tool_input: object) -> ToolResult:
+    """Validate and execute a tool with an explicitly classified result."""
+    try:
+        validation_error = _validate_tool_input(name, tool_input)
+        if validation_error:
+            return ToolResult(
+                f"Invalid input for tool '{name}': {validation_error}", ok=False
+            )
+        return _as_tool_result(_execute_tool(name, tool_input), tool_name=name)
+    except Exception as exc:
+        # Tool implementations and registry validation both run at an
+        # untrusted model-input boundary.  Preserve the string result contract
+        # even when a helper/backend raises an operational exception.
+        return ToolResult(f"Error executing tool '{name}': {exc}", ok=False)
 
 
 # ---------------------------------------------------------------------------

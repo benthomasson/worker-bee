@@ -30,6 +30,120 @@ def test_execute_tool_classifies_unknown_and_non_prefix_failures(tmp_path):
     assert nonzero.ok is False
 
 
+def test_execute_tool_validates_required_fields_and_types(tmp_path):
+    tools.set_workspace_root(tmp_path)
+
+    missing = tools.execute_tool("read_file", {})
+    wrong_type = tools.execute_tool("read_file", {"path": 42})
+    valid = tools.execute_tool("read_file", {"path": "missing.txt"})
+
+    assert missing.ok is False
+    assert "missing required field(s): path" in missing
+    assert wrong_type.ok is False
+    assert "field 'path' must be string" in wrong_type
+    assert valid.ok is False  # the tool ran and reported the missing file
+    assert "Error reading file" in valid
+
+
+def test_execute_tool_rejects_non_object_input():
+    result = tools.execute_tool("read_file", None)
+
+    assert result.ok is False
+    assert "input must be an object" in result
+
+
+def test_all_advertised_tool_schemas_validate_required_fields_and_types():
+    for tool in tools.TOOLS + tools.CHAT_TOOLS + tools.BELIEF_TOOLS:
+        schema = tool["input_schema"]
+        name = tool["name"]
+        missing = tools._validate_tool_input(name, {})
+        if schema.get("required"):
+            assert missing is not None, name
+        else:
+            assert missing is None, name
+        for field, property_schema in schema.get("properties", {}).items():
+            if "type" not in property_schema:
+                continue
+            valid_values = {
+                "string": "value",
+                "integer": 1,
+                "number": 1.5,
+                "boolean": True,
+                "object": {},
+                "array": [],
+            }
+            value = valid_values[property_schema["type"]]
+            assert tools._validate_schema_value(value, property_schema, field) is None
+            invalid = {
+                "string": 1,
+                "integer": True,
+                "number": True,
+                "boolean": "true",
+                "object": [],
+                "array": {},
+            }[property_schema["type"]]
+            assert tools._validate_schema_value(invalid, property_schema, field) is not None
+
+
+def test_validator_supports_documented_nested_constraints():
+    schema = {
+        "type": "object",
+        "required": ["config", "values"],
+        "properties": {
+            "config": {
+                "type": "object",
+                "required": ["mode"],
+                "properties": {"mode": {"type": "string", "enum": ["fast", "safe"]}},
+            },
+            "values": {
+                "type": "array",
+                "items": {"type": "number", "minimum": 0, "maximum": 10},
+            },
+        },
+    }
+    valid = {"config": {"mode": "safe"}, "values": [0, 2.5, 10], "extra": True}
+
+    assert tools._validate_schema_value(valid, schema, "input") is None
+    assert tools._validate_schema_value(
+        {"config": {"mode": "unsafe"}, "values": [1]}, schema, "input"
+    ) is not None
+    assert tools._validate_schema_value(
+        {"config": {"mode": "safe"}, "values": [-1]}, schema, "input"
+    ) is not None
+
+
+def test_tool_schema_registry_rejects_duplicate_names(monkeypatch):
+    monkeypatch.setattr(tools, "TOOLS", tools.TOOLS + [tools.TOOLS[0]])
+
+    with pytest.raises(ValueError, match="duplicate tool name.*read_file"):
+        tools._tool_schemas()
+
+
+@pytest.mark.parametrize("exception", [
+    ValueError("malformed argument"),
+    RuntimeError("backend unavailable"),
+    OSError("filesystem unavailable"),
+])
+def test_execute_tool_converts_helper_exceptions_to_failures(monkeypatch, exception):
+    def fail(_name, _input):
+        raise exception
+
+    monkeypatch.setattr(tools, "_execute_tool", fail)
+    result = tools.execute_tool("list_memory", {})
+
+    assert result.ok is False
+    assert str(exception) in result
+
+
+def test_execute_tool_converts_registry_validation_errors_to_failures(monkeypatch):
+    monkeypatch.setattr(tools, "TOOLS", tools.TOOLS + [tools.TOOLS[0]])
+
+    result = tools.execute_tool("list_memory", {})
+
+    assert result.ok is False
+    assert "duplicate tool name" in result
+
+
 @pytest.mark.parametrize(
     ("tool_name", "rendering"),
     [
