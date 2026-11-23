@@ -444,3 +444,89 @@ def test_grep_does_not_traverse_directory_symlinks(tmp_path):
     result = tools.execute_tool("grep", {"pattern": "needle"})
 
     assert result == "No matches found"
+
+
+def test_grep_reads_file_symlink_into_read_only_root(tmp_path):
+    tools.set_workspace_root(tmp_path)
+    readonly = tmp_path.parent / "readonly"
+    readonly.mkdir()
+    (readonly / "allowed.txt").write_text("allowed needle")
+    tools.set_read_only_paths([readonly])
+    (tmp_path / "link.txt").symlink_to(readonly / "allowed.txt")
+
+    result = tools.execute_tool("grep", {"pattern": "needle"})
+
+    assert "link.txt:1: allowed needle" in result
+
+
+def test_grep_closes_root_descriptor_when_traversal_fails(tmp_path, monkeypatch):
+    tools.set_workspace_root(tmp_path)
+    opened = []
+    closed = []
+    real_open_root = tools._open_root_for_read
+    real_close = tools.os.close
+
+    def recording_open_root(root):
+        fd = real_open_root(root)
+        opened.append(fd)
+        return fd
+
+    def recording_close(fd):
+        closed.append(fd)
+        return real_close(fd)
+
+    monkeypatch.setattr(tools, "_open_root_for_read", recording_open_root)
+    monkeypatch.setattr(tools.os, "close", recording_close)
+    monkeypatch.setattr(tools.os, "walk", lambda path: (_ for _ in ()).throw(OSError("walk failed")))
+
+    with pytest.raises(OSError, match="walk failed"):
+        tools._grep("needle", ".")
+
+    assert opened
+    assert opened[0] in closed
+
+
+def test_grep_uses_descriptor_safe_open(tmp_path, monkeypatch):
+    tools.set_workspace_root(tmp_path)
+    (tmp_path / "inside.txt").write_text("safe needle")
+
+    real_open = tools.os.open
+    real_fdopen = tools.os.fdopen
+    open_calls = []
+    fdopen_calls = []
+
+    def recording_open(*args, **kwargs):
+        open_calls.append((args, kwargs))
+        return real_open(*args, **kwargs)
+
+    def recording_fdopen(*args, **kwargs):
+        fdopen_calls.append((args, kwargs))
+        return real_fdopen(*args, **kwargs)
+
+    # _open_parent_directory checks descriptor-relative support by identity;
+    # include the spy in the advertised support set while it is installed.
+    monkeypatch.setattr(tools.os, "open", recording_open)
+    monkeypatch.setattr(tools.os, "fdopen", recording_fdopen)
+    monkeypatch.setattr(
+        tools.os, "supports_dir_fd",
+        set(tools.os.supports_dir_fd) | {recording_open},
+    )
+    result = tools.execute_tool("grep", {"pattern": "needle"})
+
+    assert "inside.txt:1: safe needle" in result
+    assert any(
+        kwargs.get("dir_fd") is not None
+        and args[1] & tools.os.O_NOFOLLOW
+        for args, kwargs in open_calls
+        if len(args) > 1
+    )
+    assert fdopen_calls
+
+
+def test_grep_ignores_undecodable_bytes(tmp_path):
+    tools.set_workspace_root(tmp_path)
+    (tmp_path / "binary.bin").write_bytes(b"before \xff needle\n")
+
+    result = tools.execute_tool("grep", {"pattern": "needle"})
+
+    assert "binary.bin:1: before  needle" in result

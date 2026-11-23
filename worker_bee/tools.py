@@ -1217,7 +1217,8 @@ def _read_file(path, offset=None, limit=None):
     return result
 
 
-def _open_parent_directory(path: Path, *, create: bool = True):
+def _open_parent_directory(path: Path, *, create: bool = True,
+                           require_atomic_support: bool = True):
     """Open ``path``'s parent without symlinks, optionally creating it.
 
     The returned descriptor pins every parent component for the subsequent
@@ -1231,17 +1232,20 @@ def _open_parent_directory(path: Path, *, create: bool = True):
         raise OSError(
             "safe atomic writes require O_DIRECTORY and O_NOFOLLOW support"
         )
-    replacement_supported = (
-        os.replace in os.supports_dir_fd
-        or os.rename in os.supports_dir_fd
-    )
-    if not all(
-        operation in os.supports_dir_fd
-        for operation in (os.open, os.mkdir, os.stat, os.unlink, os.chmod)
-    ) or not replacement_supported:
-        raise OSError(
-            "safe atomic writes require descriptor-relative filesystem operations"
+    if os.open not in os.supports_dir_fd:
+        raise OSError("safe descriptor-relative reads are not supported")
+    if require_atomic_support:
+        replacement_supported = (
+            os.replace in os.supports_dir_fd
+            or os.rename in os.supports_dir_fd
         )
+        if not all(
+            operation in os.supports_dir_fd
+            for operation in (os.open, os.mkdir, os.stat, os.unlink, os.chmod)
+        ) or not replacement_supported:
+            raise OSError(
+                "safe atomic writes require descriptor-relative filesystem operations"
+            )
     absolute = path.absolute()
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     fd = os.open(os.sep, flags)
@@ -1272,14 +1276,86 @@ def _open_parent_directory(path: Path, *, create: bool = True):
         raise
 
 
-def _open_file_for_read(path: Path):
-    """Open a validated file through a descriptor-pinned parent directory."""
-    parent_fd, target = _open_parent_directory(path, create=False)
+def _open_file_for_read(path: Path, *, errors=None, root_fd=None,
+                        root_path=None):
+    """Open a file through pinned parent directories.
+
+    ``root_fd`` anchors traversal to a directory descriptor acquired before
+    authorization and walking, avoiding a second absolute lookup of a root
+    that may have been replaced by another directory.
+    """
+    if root_fd is None:
+        parent_fd, target = _open_parent_directory(
+            path, create=False, require_atomic_support=False
+        )
+    else:
+        if root_path is None:
+            raise ValueError("root_path is required with root_fd")
+        try:
+            relative = Path(path).relative_to(root_path)
+        except ValueError as exc:
+            raise ValueError("path is outside anchored root") from exc
+        if not relative.parts:
+            raise IsADirectoryError(path)
+        parent_fd = os.dup(root_fd)
+        try:
+            for component in relative.parts[:-1]:
+                next_fd = os.open(
+                    component,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    dir_fd=parent_fd,
+                )
+                os.close(parent_fd)
+                parent_fd = next_fd
+        except BaseException:
+            os.close(parent_fd)
+            raise
+        target = relative.parts[-1]
+
     fd = None
     try:
         flags = os.O_RDONLY | os.O_NOFOLLOW
         fd = os.open(target, flags, dir_fd=parent_fd)
-        return os.fdopen(fd, "r")
+        fdopen_kwargs = {} if errors is None else {"errors": errors}
+        return os.fdopen(fd, "r", **fdopen_kwargs)
+    except BaseException:
+        if fd is not None:
+            os.close(fd)
+        raise
+    finally:
+        os.close(parent_fd)
+
+
+def _open_root_for_read(root: Path) -> int:
+    """Pin an approved read root for descriptor-relative file opens."""
+    required = ("O_DIRECTORY", "O_NOFOLLOW")
+    if not all(hasattr(os, name) for name in required):
+        raise OSError("safe descriptor-relative reads are not supported")
+    if os.open not in os.supports_dir_fd:
+        raise OSError("safe descriptor-relative reads are not supported")
+    # Capture the validated root's identity before any descriptor acquisition.
+    # Comparing against this snapshot detects replacement of the root pathname
+    # during the subsequent pinned traversal; checking os.stat(root) after the
+    # open would only validate whatever object replaced the original root.
+    expected = os.stat(root, follow_symlinks=False)
+    # Pin every ancestor before opening the root itself.  Opening the root by
+    # absolute pathname would allow a replacement of an attacker-controlled
+    # parent directory to redirect the initial anchor.
+    parent_fd, name = _open_parent_directory(
+        root, create=False, require_atomic_support=False
+    )
+    fd = None
+    try:
+        fd = os.open(
+            name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            dir_fd=parent_fd,
+        )
+        # Once acquired, the descriptor remains stable even if the pathname is
+        # replaced later.
+        pinned = os.fstat(fd)
+        if (expected.st_dev, expected.st_ino) != (pinned.st_dev, pinned.st_ino):
+            raise OSError("approved root changed during validation")
+        return fd
     except BaseException:
         if fd is not None:
             os.close(fd)
@@ -1396,40 +1472,67 @@ def _edit_file(path, old_string, new_string):
 
 def _grep(pattern, path):
     try:
-        path = _workspace_path(path)
-    except ValueError as e:
-        return f"Error: {e}"
-    try:
         regex = re.compile(pattern)
     except re.error as e:
         return f"Invalid regex: {e}"
 
     matches = []
     skip = {".git", ".venv", "node_modules", "__pycache__", "target"}
-    for root, dirs, files in os.walk(path):
-        # os.walk does not follow directory symlinks by default, but prune them
-        # explicitly so this remains true if traversal options change later.
-        dirs[:] = [
-            d for d in dirs
-            if d not in skip
-            and not d.startswith(".")
-            and not Path(root, d).is_symlink()
-        ]
-        for filename in files:
-            filepath = Path(root, filename)
+    # Acquire root descriptors before resolving the user path.  This makes the
+    # descriptor the authorization anchor: a replacement between resolve() and
+    # the later file opens cannot cause us to acquire a different root.
+    root_fds = {}
+    root_open_errors = {}
+    try:
+        for allowed_root in [_workspace_root, *_read_only_roots]:
             try:
-                # A file symlink can point outside the workspace (or an
-                # explicitly granted read-only root). Resolve and validate the
-                # target before opening it, just as _glob does for its matches.
-                resolved = filepath.resolve()
-                if _any_allowed_root(resolved) is None or not resolved.is_file():
+                root_fds[allowed_root] = _open_root_for_read(allowed_root)
+            except OSError as exc:
+                root_open_errors[allowed_root] = exc
+
+        try:
+            path = _workspace_path(path)
+        except ValueError as e:
+            return f"Error: {e}"
+
+        anchor_root = _any_allowed_root(path.resolve())
+        if anchor_root is None:
+            return "Error: path is outside workspace"
+        if anchor_root not in root_fds:
+            exc = root_open_errors.get(anchor_root, OSError("approved root unavailable"))
+            return f"Error searching files: {exc}"
+
+        for root, dirs, files in os.walk(path):
+            # os.walk does not follow directory symlinks by default, but prune them
+            # explicitly so this remains true if traversal options change later.
+            dirs[:] = [
+                d for d in dirs
+                if d not in skip
+                and not d.startswith(".")
+                and not Path(root, d).is_symlink()
+            ]
+            for filename in files:
+                filepath = Path(root, filename)
+                try:
+                    resolved = filepath.resolve()
+                    file_root = _any_allowed_root(resolved)
+                    if file_root is None or not resolved.is_file():
+                        continue
+                    if file_root not in root_fds:
+                        root_fds[file_root] = _open_root_for_read(file_root)
+                    with _open_file_for_read(
+                        resolved, errors="ignore", root_fd=root_fds[file_root],
+                        root_path=file_root,
+                    ) as f:
+                        for i, line in enumerate(f, 1):
+                            if regex.search(line):
+                                matches.append(f"{filepath}:{i}: {line.rstrip()}")
+                except (OSError, IsADirectoryError, ValueError):
                     continue
-                with open(resolved, "r", errors="ignore") as f:
-                    for i, line in enumerate(f, 1):
-                        if regex.search(line):
-                            matches.append(f"{filepath}:{i}: {line.rstrip()}")
-            except (OSError, IsADirectoryError, ValueError):
-                continue
+
+    finally:
+        for fd in root_fds.values():
+            os.close(fd)
 
     if not matches:
         return "No matches found"
