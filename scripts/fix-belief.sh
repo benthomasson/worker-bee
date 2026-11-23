@@ -355,9 +355,9 @@ for f in d.get('affected_files', []):
         continue
     fi
 
-    # Neither FIXED nor PARTIAL
-    log "verify-fix did not return FIXED or PARTIAL"
-    echo "$VERIFY_FIX_OUTPUT"
+    # Neither FIXED nor PARTIAL (e.g. NOT_FIXED)
+    log "verify-fix verdict: $VERDICT"
+    python3 -c "import json,sys; print(json.dumps(json.load(open(sys.argv[1])),indent=2))" "$VERIFY_JSON" 2>/dev/null || true
     abandon_branch "verify-fix returned $VERDICT for $BELIEF_ID"
     exit 1
 done
