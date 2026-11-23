@@ -612,10 +612,24 @@ def _init_log(log_dir: str | Path, task: str, model: str, dry_run: bool) -> dict
     log_dir.mkdir(parents=True, exist_ok=True)
 
     now = datetime.now(timezone.utc)
-    filename = now.strftime("%Y%m%d-%H%M%S") + ".jsonl"
-    log_path = log_dir / filename
+    timestamp = now.strftime("%Y%m%d-%H%M%S-%f")
 
-    log = {"path": log_path, "file": open(log_path, "a")}
+    # Create the file exclusively so simultaneous sessions cannot select the
+    # same log.  The microsecond timestamp handles the usual case; the
+    # suffix fallback also covers clocks with coarse resolution or a repeated
+    # timestamp across processes.
+    for attempt in range(1000):
+        suffix = "" if attempt == 0 else f"-{attempt}"
+        log_path = log_dir / f"{timestamp}{suffix}.jsonl"
+        try:
+            log_file = open(log_path, "x")
+            break
+        except FileExistsError:
+            continue
+    else:
+        raise FileExistsError(f"Could not allocate a unique log filename in {log_dir}")
+
+    log = {"path": log_path, "file": log_file}
     _log_event(log, "session_start",
                task=task, model=model, dry_run=dry_run)
     return log
