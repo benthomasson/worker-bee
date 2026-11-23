@@ -4,7 +4,7 @@ import argparse
 import sys
 
 
-def main(argv: list[str] | None = None) -> int:
+def _main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="worker-bee",
         description="Belief-driven orchestrator for small-context worker bees",
@@ -326,6 +326,15 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def main(argv: list[str] | None = None) -> int:
+    """Run the CLI and turn unexpected operational failures into status 1."""
+    try:
+        return _main(argv)
+    except Exception as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+
 def _maybe_configure_mcp(args) -> None:
     """Configure MCP belief store if --mcp was passed."""
     mcp_url = getattr(args, "mcp", None)
@@ -337,8 +346,10 @@ def _maybe_configure_mcp(args) -> None:
         token = os.environ.get("REASONS_MCP_TOKEN", "")
     is_local = "localhost" in mcp_url or "127.0.0.1" in mcp_url
     if not token and not is_local:
-        print("Error: --mcp-token or REASONS_MCP_TOKEN env var required with --mcp (not needed for localhost)", file=sys.stderr)
-        sys.exit(1)
+        raise RuntimeError(
+            "--mcp-token or REASONS_MCP_TOKEN env var required with --mcp "
+            "(not needed for localhost)"
+        )
     domain_id = getattr(args, "mcp_domain", None)
     from worker_bee.mcp_beliefs import set_mcp_beliefs
     store = set_mcp_beliefs(mcp_url, token, domain_id)
