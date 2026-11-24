@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 
 
@@ -30,6 +31,69 @@ def extract(db_path: str | Path, *, types: list[str] | None = None) -> list[dict
         issues.extend(_find_unreviewed(str(db_path)))
 
     return issues
+
+
+def filter_acceptance_gates(
+    db_path: str | Path,
+    issues: list[dict],
+    *,
+    require_reviewed: bool = True,
+    require_verified: bool = True,
+) -> list[dict]:
+    """Keep only issues backed by accepted IN nodes.
+
+    Database access belongs to extraction, so callers do not need to duplicate
+    the node-state query.  Issues without one concrete belief ID (such as
+    contradictions) cannot satisfy an acceptance gate and are excluded.
+    """
+    db_path = Path(db_path)
+    if not db_path.exists():
+        raise FileNotFoundError(f"Database not found: {db_path}")
+    if not require_reviewed and not require_verified:
+        return issues
+    # Contradiction issues use a display ID made from all of their members;
+    # acceptance applies to every member rather than to that composite string.
+    issue_members: dict[int, list[str]] = {}
+    ids: set[str] = set()
+    for index, issue in enumerate(issues):
+        belief_id = issue.get("belief_id")
+        if not isinstance(belief_id, str):
+            continue
+        if issue.get("type") == "contradiction":
+            members = [member.strip() for member in belief_id.split(" vs ") if member.strip()]
+        else:
+            members = [belief_id]
+        if members:
+            issue_members[index] = members
+            ids.update(members)
+    if not ids:
+        return []
+
+    accepted: set[str] = set()
+    # Keep each query below SQLite's usual host-parameter limit.  This also
+    # avoids making acceptance depend on a connection-specific limit.
+    batch_size = 900
+    with sqlite3.connect(str(db_path)) as conn:
+        id_list = list(ids)
+        for start in range(0, len(id_list), batch_size):
+            batch = id_list[start:start + batch_size]
+            placeholders = ",".join("?" for _ in batch)
+            rows = conn.execute(
+                f"SELECT id, truth_value, reviewed_at, verified_at FROM nodes "
+                f"WHERE id IN ({placeholders})", tuple(batch)
+            ).fetchall()
+            accepted.update(
+                row[0] for row in rows
+                if row[1] == "IN"
+                and (not require_reviewed or _valid_timestamp(row[2]))
+                and (not require_verified or _valid_timestamp(row[3]))
+            )
+
+    return [
+        issue for index, issue in enumerate(issues)
+        if index in issue_members
+        and all(member in accepted for member in issue_members[index])
+    ]
 
 
 def _find_gated(db_path: str) -> list[dict]:
@@ -179,6 +243,20 @@ def _find_unreviewed(db_path: str) -> list[dict]:
         }
         for i, row in enumerate(rows)
     ]
+
+
+def _valid_timestamp(value: object) -> bool:
+    """Return whether an acceptance field contains a valid ISO timestamp."""
+    if not isinstance(value, str) or not value.strip():
+        return False
+    timestamp = value.strip()
+    if "T" not in timestamp and " " not in timestamp:
+        return False
+    try:
+        datetime.fromisoformat(timestamp)
+    except ValueError:
+        return False
+    return True
 
 
 def _parse_sources(source: str | None) -> list[str]:

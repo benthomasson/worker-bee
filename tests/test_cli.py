@@ -57,7 +57,34 @@ def test_run_forwards_progress_options(tmp_path):
     run.assert_called_once_with(
         "brain.db", model="ollama:qwen3.8:27b", dry_run=False,
         requests_per_second=None, progress_file=str(tmp_path / "p.json"), resume=True,
+        require_reviewed=True, require_verified=True,
     )
+
+
+def test_run_forwards_acceptance_gates():
+    with patch("worker_bee.pipeline.run_pipeline") as run:
+        assert main(["run", "brain.db", "--require-reviewed", "--require-verified"]) == 0
+    assert run.call_args.kwargs["require_reviewed"] is True
+    assert run.call_args.kwargs["require_verified"] is True
+
+
+def test_run_acceptance_gates_can_be_disabled():
+    with patch("worker_bee.pipeline.run_pipeline") as run:
+        assert main([
+            "run", "brain.db", "--no-require-reviewed", "--no-require-verified"
+        ]) == 0
+    assert run.call_args.kwargs["require_reviewed"] is False
+    assert run.call_args.kwargs["require_verified"] is False
+
+
+def test_run_help_describes_acceptance_gate_defaults(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        main(["run", "--help"])
+    assert exc_info.value.code == 0
+    output = capsys.readouterr().out
+    assert "--require-reviewed" in output
+    assert "--no-require-reviewed" in output
+    assert "default: enabled" in output
 
 
 def test_run_uses_default_checkpoint_and_resumes(tmp_path):
@@ -67,6 +94,7 @@ def test_run_uses_default_checkpoint_and_resumes(tmp_path):
     run.assert_called_once_with(
         db, model="ollama:qwen3.8:27b", dry_run=False,
         requests_per_second=None, progress_file=f"{db}.progress.json", resume=True,
+        require_reviewed=True, require_verified=True,
     )
 
 
@@ -77,6 +105,7 @@ def test_dry_run_does_not_create_default_checkpoint(tmp_path):
     run.assert_called_once_with(
         db, model="ollama:qwen3.8:27b", dry_run=True,
         requests_per_second=None, progress_file=None, resume=False,
+        require_reviewed=True, require_verified=True,
     )
 
 

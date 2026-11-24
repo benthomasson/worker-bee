@@ -139,6 +139,10 @@ def _main(argv: list[str] | None = None) -> int:
                          help="Checkpoint items serially after each response (default: DB.progress.json)")
     sub_run.add_argument("--resume", action="store_true",
                          help="Resume from the checkpoint, retrying incomplete items (cannot be combined with --dry-run)")
+    sub_run.add_argument("--require-reviewed", action=argparse.BooleanOptionalAction, default=True,
+                         help="Require a recorded review before dispatch (default: enabled)")
+    sub_run.add_argument("--require-verified", action=argparse.BooleanOptionalAction, default=True,
+                         help="Require a recorded verification before dispatch (default: enabled)")
 
     args = parser.parse_args(argv)
 
@@ -353,6 +357,8 @@ def _main(argv: list[str] | None = None) -> int:
             requests_per_second=args.requests_per_second,
             progress_file=progress_file,
             resume=resume,
+            require_reviewed=args.require_reviewed,
+            require_verified=args.require_verified,
         )
         return 0
 

@@ -5,7 +5,7 @@ import sqlite3
 
 import pytest
 
-from worker_bee.extractor import extract
+from worker_bee.extractor import extract, filter_acceptance_gates
 
 
 @pytest.fixture
@@ -162,6 +162,79 @@ def test_extract_gated_skips_all_in(reasons_db):
 
     issues = extract(reasons_db, types=["gated"])
     assert len(issues) == 0
+
+
+def test_filter_acceptance_gates_handles_missing_out_null_and_empty(reasons_db):
+    conn = sqlite3.connect(str(reasons_db))
+    conn.executemany(
+        "INSERT INTO nodes (id, text, truth_value, reviewed_at, verified_at) VALUES (?, ?, ?, ?, ?)",
+        [
+            ("accepted", "Accepted", "IN", "2026-01-01T00:00:00+00:00", "2026-01-02T00:00:00+00:00"),
+            ("out", "Out", "OUT", "2026-01-01T00:00:00+00:00", "2026-01-02T00:00:00+00:00"),
+            ("null-time", "Null", "IN", None, "2026-01-02T00:00:00+00:00"),
+            ("empty-time", "Empty", "IN", "", "2026-01-02T00:00:00+00:00"),
+        ],
+    )
+    conn.commit()
+    conn.close()
+    issues = [
+        {"belief_id": "accepted"}, {"belief_id": "out"},
+        {"belief_id": "null-time"}, {"belief_id": "empty-time"},
+        {"belief_id": "missing"},
+        {"belief_id": "accepted vs out", "type": "contradiction"},
+        {"belief_id": "accepted vs accepted", "type": "contradiction"},
+    ]
+    assert filter_acceptance_gates(reasons_db, issues, require_reviewed=True, require_verified=True) == [
+        issues[0], issues[5]
+    ]
+
+
+@pytest.mark.parametrize(
+    ("require_reviewed", "require_verified", "expected"),
+    [
+        (True, False, ["accepted", "review-only"]),
+        (False, True, ["accepted", "verify-only"]),
+        (False, False, ["accepted", "review-only", "verify-only", "out"]),
+    ],
+)
+def test_filter_acceptance_gates_independent_requirements(
+    reasons_db, require_reviewed, require_verified, expected
+):
+    with sqlite3.connect(str(reasons_db)) as conn:
+        conn.executemany(
+            "INSERT INTO nodes (id, text, truth_value, reviewed_at, verified_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            [
+                ("accepted", "Accepted", "IN", "2026-01-01T00:00:00+00:00", "2026-01-02T00:00:00+00:00"),
+                ("review-only", "Review", "IN", "2026-01-01T00:00:00+00:00", ""),
+                ("verify-only", "Verify", "IN", "", "2026-01-02T00:00:00+00:00"),
+                ("out", "Out", "OUT", "2026-01-01T00:00:00+00:00", "2026-01-02T00:00:00+00:00"),
+            ],
+        )
+    issues = [{"belief_id": belief_id} for belief_id in ["accepted", "review-only", "verify-only", "out"]]
+    result = filter_acceptance_gates(
+        reasons_db, issues, require_reviewed=require_reviewed, require_verified=require_verified
+    )
+    assert [issue["belief_id"] for issue in result] == expected
+
+
+def test_filter_acceptance_gates_preserves_order_and_requires_iso_timestamps(reasons_db):
+    with sqlite3.connect(str(reasons_db)) as conn:
+        conn.execute(
+            "INSERT INTO nodes (id, text, truth_value, reviewed_at, verified_at) VALUES (?, ?, ?, ?, ?)",
+            ("valid", "Valid", "IN", " 2026-01-01T00:00:00+00:00 ", "2026-01-02T00:00:00+00:00"),
+        )
+        conn.execute(
+            "INSERT INTO nodes (id, text, truth_value, reviewed_at, verified_at) VALUES (?, ?, ?, ?, ?)",
+            ("invalid", "Invalid", "IN", "not-a-timestamp", "2026-01-02T00:00:00+00:00"),
+        )
+    issues = [{"belief_id": "missing"}, {"belief_id": "valid"}, {"belief_id": "invalid"}]
+    assert filter_acceptance_gates(reasons_db, issues) == [issues[1]]
+
+
+def test_filter_acceptance_gates_missing_db_fails_fast(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        filter_acceptance_gates(tmp_path / "missing.db", [{"belief_id": "node"}])
 
 
 def test_extract_contradiction(reasons_db):

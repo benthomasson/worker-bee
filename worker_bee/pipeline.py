@@ -11,7 +11,7 @@ from pathlib import Path
 
 import fcntl
 
-from worker_bee.extractor import extract
+from worker_bee.extractor import extract, filter_acceptance_gates
 from worker_bee.prompter import build_prompt
 from worker_bee.dispatcher import configure_rate_limit, dispatch_batch, Response
 
@@ -25,6 +25,8 @@ def run_pipeline(
     requests_per_second: float | None = None,
     progress_file: str | Path | None = None,
     resume: bool = False,
+    require_reviewed: bool = True,
+    require_verified: bool = True,
 ) -> list[dict]:
     """Run the first-milestone pipeline: extract → prompt → dispatch → print.
 
@@ -57,6 +59,8 @@ def run_pipeline(
                 max_workers=max_workers,
                 progress_file=progress_file,
                 resume=resume,
+                require_reviewed=require_reviewed,
+                require_verified=require_verified,
             )
     finally:
         if requests_per_second is not None:
@@ -71,8 +75,16 @@ def _run_pipeline(
     max_workers: int,
     progress_file: str | Path | None,
     resume: bool,
+    require_reviewed: bool,
+    require_verified: bool,
 ) -> list[dict]:
     extracted_issues = extract(db_path)
+    extracted_issues = filter_acceptance_gates(
+        db_path,
+        extracted_issues,
+        require_reviewed=require_reviewed,
+        require_verified=require_verified,
+    )
     keys = [_issue_key(issue) for issue in extracted_issues]
     if len(keys) != len(set(keys)):
         raise ValueError("duplicate issue keys in extracted issues")

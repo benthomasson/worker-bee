@@ -2,14 +2,39 @@
 
 from unittest.mock import patch
 
+import pytest
+
 from worker_bee.dispatcher import Response, dispatch_batch
 from worker_bee.pipeline import run_pipeline
+
 
 ISSUES = [
     {"type": "gated", "belief_id": "b-one", "source": "docs/one.md"},
     {"type": "gated", "belief_id": "b-two", "source": "docs/two.md"},
     {"type": "gated", "belief_id": "b-three", "source": "docs/three.md"},
 ]
+
+
+@pytest.fixture(autouse=True)
+def _provide_synthetic_database():
+    """Give legacy wiring tests a real database with accepted synthetic nodes."""
+    import sqlite3
+    from pathlib import Path
+
+    db_path = Path("brain.db")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS nodes "
+            "(id TEXT, truth_value TEXT, reviewed_at TEXT, verified_at TEXT)"
+        )
+        conn.execute("DELETE FROM nodes")
+        conn.executemany(
+            "INSERT INTO nodes VALUES (?, 'IN', '2026-01-01T00:00:00+00:00', "
+            "'2026-01-02T00:00:00+00:00')",
+            [(issue["belief_id"],) for issue in ISSUES],
+        )
+    yield
+    db_path.unlink(missing_ok=True)
 
 
 def _ok_response(belief_id: str) -> Response:
@@ -38,6 +63,35 @@ def test_run_pipeline_uses_dispatch_batch_and_preserves_order(tmp_path):
         "answer for b-two",
         "answer for b-three",
     ]
+
+
+def test_run_pipeline_acceptance_gates_filter_before_prompt_and_dispatch(tmp_path):
+    import sqlite3
+
+    db = tmp_path / "brain.db"
+    with sqlite3.connect(db) as conn:
+        conn.execute("CREATE TABLE nodes (id TEXT, truth_value TEXT, reviewed_at TEXT, verified_at TEXT)")
+        conn.executemany("INSERT INTO nodes VALUES (?, ?, ?, ?)", [
+            ("b-one", "IN", "2026-01-01T00:00:00+00:00", "2026-01-02T00:00:00+00:00"),
+            ("b-two", "IN", "", "2026-01-02T00:00:00+00:00"),
+            ("b-three", "IN", "2026-01-01T00:00:00+00:00", ""),
+        ])
+
+    extracted = list(ISSUES) + [
+        {"type": "contradiction", "belief_id": "b-one vs b-two"},
+        {"type": "unreviewed", "belief_id": "missing-node"},
+    ]
+    with (
+        patch("worker_bee.pipeline.extract", return_value=extracted),
+        patch("worker_bee.pipeline.build_prompt", side_effect=lambda issue: f"prompt for {issue['belief_id']}"),
+        patch("worker_bee.pipeline.dispatch_batch", side_effect=lambda prompts, **kwargs: [
+            (issue, _ok_response(issue["belief_id"])) for issue, _ in prompts
+        ]) as dispatch,
+    ):
+        results = run_pipeline(str(db), require_reviewed=True, require_verified=True)
+
+    assert [result["issue"]["belief_id"] for result in results] == ["b-one"]
+    assert [issue["belief_id"] for issue, _ in dispatch.call_args.args[0]] == ["b-one"]
 
 
 def test_run_pipeline_defaults_to_restart_safe_checkpoint(tmp_path):
