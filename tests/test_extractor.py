@@ -87,6 +87,35 @@ def test_extract_gated(reasons_db):
     assert "node-b" in issues[0]["description"]
 
 
+def test_extract_gated_combines_out_antecedents_across_justifications(reasons_db):
+    conn = sqlite3.connect(str(reasons_db))
+    conn.executemany(
+        "INSERT INTO nodes (id, text, truth_value) VALUES (?, ?, ?)",
+        [
+            ("node-a", "Node A", "IN"),
+            ("node-b", "Node B", "OUT"),
+            ("node-c", "Node C", "OUT"),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO justifications (node_id, type, antecedents_json) VALUES (?, ?, ?)",
+        [
+            ("node-a", "SL", json.dumps(["node-a"])),
+            ("node-a", "SL", json.dumps(["node-c", "node-b", "node-c"])),
+            ("node-a", "SL", json.dumps(["node-b"])),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    issues = extract(reasons_db, types=["gated"])
+
+    assert len(issues) == 1
+    assert issues[0]["description"] == (
+        "Node is IN but antecedent(s) node-c, node-b are OUT"
+    )
+
+
 def test_extract_gated_skips_all_in(reasons_db):
     conn = sqlite3.connect(str(reasons_db))
     conn.execute(

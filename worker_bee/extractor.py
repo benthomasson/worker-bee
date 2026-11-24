@@ -41,32 +41,50 @@ def _find_gated(db_path: str) -> list[dict]:
         FROM justifications j
         JOIN nodes n ON n.id = j.node_id
         WHERE n.truth_value = 'IN'
+        ORDER BY j.rowid
     """).fetchall()
 
     issues = []
-    seen = set()
+    issues_by_node = {}
+    out_names_by_node = {}
     for row in rows:
         antecedents = json.loads(row["antecedents_json"])
         if not antecedents:
             continue
 
         placeholders = ",".join("?" for _ in antecedents)
-        out_ants = conn.execute(
-            f"SELECT id FROM nodes WHERE id IN ({placeholders}) AND truth_value = 'OUT'",
-            antecedents,
-        ).fetchall()
+        out_ids = {
+            out_ant["id"]
+            for out_ant in conn.execute(
+                f"SELECT id FROM nodes WHERE id IN ({placeholders}) AND truth_value = 'OUT'",
+                antecedents,
+            )
+        }
 
-        if out_ants and row["node_id"] not in seen:
-            seen.add(row["node_id"])
-            out_names = [r["id"] for r in out_ants]
-            issues.append({
+        node_id = row["node_id"]
+        out_names = out_names_by_node.setdefault(node_id, [])
+        for antecedent in antecedents:
+            if antecedent in out_ids and antecedent not in out_names:
+                out_names.append(antecedent)
+        if not out_names:
+            continue
+
+        issue = issues_by_node.get(node_id)
+        if issue is None:
+            issue = {
                 "id": f"gated-{len(issues)}",
                 "type": "gated",
-                "belief_id": row["node_id"],
+                "belief_id": node_id,
                 "belief_text": row["text"],
                 "source_files": _parse_sources(row["source"]),
-                "description": f"Node is IN but antecedent(s) {', '.join(out_names)} are OUT",
-            })
+                "description": "",
+            }
+            issues_by_node[node_id] = issue
+            issues.append(issue)
+
+        issue["description"] = (
+            f"Node is IN but antecedent(s) {', '.join(out_names)} are OUT"
+        )
 
     conn.close()
     return issues
