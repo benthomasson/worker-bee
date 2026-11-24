@@ -36,6 +36,8 @@ def _main(argv: list[str] | None = None) -> int:
     sub_verify.add_argument("--project-dir", default=None, help="Path to the source project (guessed from db path if omitted)")
     sub_verify.add_argument("--model", default="ollama:qwen3.8:27b", help="Model to use")
     sub_verify.add_argument("--limit", type=int, default=None, help="Max beliefs to verify")
+    sub_verify.add_argument("--max-turns", type=int, default=20, help="Max tool-use turns for agentic verification")
+    sub_verify.add_argument("--num-ctx", type=int, default=None, help="Context window size")
     sub_verify.add_argument("--dry-run", action="store_true", help="Print prompt without dispatching")
     sub_verify.add_argument("--verbose", "-v", action="store_true", help="Print prompt before dispatching")
 
@@ -197,11 +199,14 @@ def _main(argv: list[str] | None = None) -> int:
                 model=args.model,
                 dry_run=args.dry_run,
                 verbose=args.verbose,
+                max_turns=args.max_turns,
+                num_ctx=args.num_ctx,
             )
             if result.verified is not None:
                 status = "VERIFIED" if result.verified else "NOT VERIFIED"
-                print(f"\n{result.belief_id}: {status} ({result.confidence})")
-                print(f"  {result.comment}")
+                print(f"\n{result.belief_id}: {status}")
+                print(f"  Evidence: {result.evidence}")
+                print(f"  Justification: {result.comment}")
         else:
             from worker_bee.verifier import verify_unverified
             results = verify_unverified(
@@ -211,6 +216,8 @@ def _main(argv: list[str] | None = None) -> int:
                 limit=args.limit,
                 dry_run=args.dry_run,
                 verbose=args.verbose,
+                max_turns=args.max_turns,
+                num_ctx=args.num_ctx,
             )
             if results:
                 verified = sum(1 for r in results if r.verified)

@@ -113,24 +113,21 @@ log "Step 1: Verify belief is real"
 
 VERIFY_OUTPUT=$(cd "$REPO" && uv run worker-bee verify "$DB" "$BELIEF_ID" \
     --project-dir "$REPO" \
-    --model "$MODEL" 2>&1) || true
+    --model "$MODEL" \
+    --max-turns "$MAX_TURNS" \
+    --num-ctx "$NUM_CTX" 2>&1) || true
 echo "$VERIFY_OUTPUT"
 
 if echo "$VERIFY_OUTPUT" | grep -q "NOT VERIFIED"; then
-    CONFIDENCE=$(echo "$VERIFY_OUTPUT" | grep -o "confidence: [a-z]*" | head -1 | cut -d' ' -f2)
+    EVIDENCE=$(echo "$VERIFY_OUTPUT" | grep "Evidence:" | head -1 | sed 's/.*Evidence: //')
+    JUSTIFICATION=$(echo "$VERIFY_OUTPUT" | grep "Justification:" | head -1 | sed 's/.*Justification: //')
     echo ""
-    echo "Belief is NOT VERIFIED (confidence: ${CONFIDENCE:-unknown})."
+    echo "Belief is NOT VERIFIED."
 
-    if [[ "$CONFIDENCE" == "high" ]]; then
-        step "Auto-retracting belief (high confidence)"
-        EVIDENCE=$(echo "$VERIFY_OUTPUT" | grep "Evidence:" | head -1 | sed 's/.*Evidence: //')
-        reasonsforge --db "$DB" retract "$BELIEF_ID" \
-            --reason "Auto-retracted: NOT VERIFIED (high). ${EVIDENCE}" \
-            2>&1 || true
-    else
-        echo "Confidence is not high — skipping auto-retraction."
-        echo "To retract manually: reasonsforge retract $BELIEF_ID"
-    fi
+    step "Auto-retracting belief based on agentic verification"
+    reasonsforge --db "$DB" retract "$BELIEF_ID" \
+        --reason "Auto-retracted: NOT VERIFIED. ${JUSTIFICATION:-$EVIDENCE}" \
+        2>&1 || true
 
     exit 0
 fi

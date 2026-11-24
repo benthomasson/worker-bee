@@ -271,6 +271,7 @@ def run_edit_loop(
     allow_questions: bool = True,
     workspace_root: str | Path | None = None,
     read_only_paths: str | Path | list[str | Path] | None = None,
+    custom_tools: list[dict] | None = None,
 ) -> EditSession:
     """Run a multi-turn code-editing conversation with tool use.
 
@@ -308,7 +309,7 @@ def run_edit_loop(
     system = prefix + task
     messages: list[dict] = [{"role": "user", "content": "Begin."}]
 
-    tools = TOOLS[:]
+    tools = custom_tools[:] if custom_tools is not None else TOOLS[:]
     if chat_mode and allow_questions:
         tools.extend(CHAT_TOOLS)
     from .mcp_beliefs import get_mcp_store
