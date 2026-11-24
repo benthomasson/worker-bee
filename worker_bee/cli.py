@@ -134,9 +134,9 @@ def _main(argv: list[str] | None = None) -> int:
     sub_run.add_argument("--requests-per-second", type=float, default=None,
                          help="Maximum request start rate for this model")
     sub_run.add_argument("--progress-file", default=None, metavar="FILE",
-                         help="Checkpoint items serially after each response; an existing FILE requires --resume")
+                         help="Checkpoint items serially after each response (default: DB.progress.json)")
     sub_run.add_argument("--resume", action="store_true",
-                         help="Resume from --progress-file, retrying incomplete items (cannot be combined with --dry-run)")
+                         help="Resume from the checkpoint, retrying incomplete items (cannot be combined with --dry-run)")
 
     args = parser.parse_args(argv)
 
@@ -333,13 +333,22 @@ def _main(argv: list[str] | None = None) -> int:
 
     if args.command == "run":
         from worker_bee.pipeline import run_pipeline
+
+        # Normal CLI runs are restart-safe by default.  Keep the checkpoint next
+        # to the database and automatically resume it; an explicit path retains
+        # the stricter requirement that --resume be supplied for an existing file.
+        progress_file = args.progress_file
+        resume = args.resume
+        if progress_file is None and not args.dry_run:
+            progress_file = f"{args.db}.progress.json"
+            resume = True
         run_pipeline(
             args.db,
             model=args.model,
             dry_run=args.dry_run,
             requests_per_second=args.requests_per_second,
-            progress_file=args.progress_file,
-            resume=args.resume,
+            progress_file=progress_file,
+            resume=resume,
         )
         return 0
 

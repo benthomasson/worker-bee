@@ -16,7 +16,7 @@ def _ok_response(belief_id: str) -> Response:
     return Response(f"answer for {belief_id}", "test-model", 10, 5)
 
 
-def test_run_pipeline_uses_dispatch_batch_and_preserves_order():
+def test_run_pipeline_uses_dispatch_batch_and_preserves_order(tmp_path):
     def fake_batch(prompts, **kwargs):
         # dispatch_batch returns (issue, response) pairs in input order
         return [(issue, _ok_response(issue["belief_id"])) for issue, _ in prompts]
@@ -26,7 +26,7 @@ def test_run_pipeline_uses_dispatch_batch_and_preserves_order():
         patch("worker_bee.pipeline.build_prompt", side_effect=lambda issue: f"prompt for {issue['belief_id']}"),
         patch("worker_bee.pipeline.dispatch_batch", side_effect=fake_batch) as mock_batch,
     ):
-        results = run_pipeline("brain.db", model="test")
+        results = run_pipeline("brain.db", model="test", progress_file=tmp_path / "progress.json")
 
     assert mock_batch.call_count == 1
     _, batch_kwargs = mock_batch.call_args
@@ -40,7 +40,29 @@ def test_run_pipeline_uses_dispatch_batch_and_preserves_order():
     ]
 
 
-def test_run_pipeline_keeps_failed_items_with_error():
+def test_run_pipeline_defaults_to_restart_safe_checkpoint(tmp_path):
+    db = tmp_path / "brain.db"
+    progress = db.with_name(f"{db.name}.progress.json")
+    calls = []
+
+    def fake_batch(prompts, **kwargs):
+        calls.extend(issue["belief_id"] for issue, _ in prompts)
+        return [(issue, _ok_response(issue["belief_id"])) for issue, _ in prompts]
+
+    with (
+        patch("worker_bee.pipeline.extract", return_value=[ISSUES[0]]),
+        patch("worker_bee.pipeline.build_prompt", return_value="prompt"),
+        patch("worker_bee.pipeline.dispatch_batch", side_effect=fake_batch),
+    ):
+        run_pipeline(str(db), model="test")
+        resumed = run_pipeline(str(db), model="test")
+
+    assert calls == ["b-one"]
+    assert progress.exists()
+    assert resumed[0]["response"].text == "answer for b-one"
+
+
+def test_run_pipeline_keeps_failed_items_with_error(tmp_path):
     good = _ok_response("b-one")
     bad = Response("", "test-model", 0, 0, error="RuntimeError: nope")
 
@@ -52,7 +74,7 @@ def test_run_pipeline_keeps_failed_items_with_error():
             return_value=[(ISSUES[0], good), (ISSUES[1], bad), (ISSUES[2], _ok_response("b-three"))],
         ),
     ):
-        results = run_pipeline("brain.db")
+        results = run_pipeline("brain.db", progress_file=tmp_path / "progress.json")
 
     assert [r["issue"]["belief_id"] for r in results] == ["b-one", "b-two", "b-three"]
     assert results[0]["response"].error is None
@@ -168,6 +190,18 @@ def test_pipeline_rejects_progress_dry_run(tmp_path):
             assert "dry-run" in str(exc)
         else:
             raise AssertionError("expected dry-run validation error")
+
+
+def test_progress_rejects_malformed_json_with_clear_error(tmp_path):
+    progress = tmp_path / "progress.json"
+    progress.write_text('{"version": 1,', encoding="utf-8")
+    with patch("worker_bee.pipeline.extract", return_value=[]):
+        try:
+            run_pipeline("brain.db", progress_file=progress, resume=True)
+        except ValueError as exc:
+            assert "invalid progress file JSON" in str(exc)
+        else:
+            raise AssertionError("expected malformed progress error")
 
 
 def test_progress_item_round_trip_and_validation():

@@ -25,6 +25,26 @@ def test_run_forwards_progress_options(tmp_path):
     )
 
 
+def test_run_uses_default_checkpoint_and_resumes(tmp_path):
+    db = str(tmp_path / "brain.db")
+    with patch("worker_bee.pipeline.run_pipeline") as run:
+        assert main(["run", db]) == 0
+    run.assert_called_once_with(
+        db, model="ollama:qwen3.8:27b", dry_run=False,
+        requests_per_second=None, progress_file=f"{db}.progress.json", resume=True,
+    )
+
+
+def test_dry_run_does_not_create_default_checkpoint(tmp_path):
+    db = str(tmp_path / "brain.db")
+    with patch("worker_bee.pipeline.run_pipeline") as run:
+        assert main(["run", db, "--dry-run"]) == 0
+    run.assert_called_once_with(
+        db, model="ollama:qwen3.8:27b", dry_run=True,
+        requests_per_second=None, progress_file=None, resume=False,
+    )
+
+
 def test_run_help_mentions_progress_options(capsys):
     with pytest.raises(SystemExit) as exc_info:
         main(["run", "--help"])

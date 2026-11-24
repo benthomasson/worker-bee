@@ -6,7 +6,10 @@ import json
 import os
 import sys
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
+
+import fcntl
 
 from worker_bee.extractor import extract
 from worker_bee.prompter import build_prompt
@@ -26,27 +29,35 @@ def run_pipeline(
     """Run the first-milestone pipeline: extract → prompt → dispatch → print.
 
     A rate supplied for this invocation is cleared when the pipeline exits, so
-    it does not unexpectedly affect later calls in the same process.  Progress
-    mode checkpoints items serially after each response; failed responses are
-    recorded but retried on resume.
+    it does not unexpectedly affect later calls in the same process.  Normal
+    runs use ``<db_path>.progress.json`` and resume it automatically; dry runs
+    do not create a checkpoint.  Progress mode checkpoints items serially after
+    each response; failed responses are recorded but retried on resume.
     """
+    # Keep restart safety at the pipeline API boundary, rather than relying on
+    # each caller to remember to configure a checkpoint.  An explicitly supplied
+    # progress path retains its existing --resume requirement.
+    if progress_file is None and not dry_run and not resume:
+        progress_file = f"{db_path}.progress.json"
+        resume = True
     if resume and progress_file is None:
         raise ValueError("--resume requires --progress-file")
     if dry_run and progress_file is not None:
         raise ValueError("--dry-run cannot be combined with --progress-file")
-    if progress_file is not None and not resume and Path(progress_file).exists():
-        raise ValueError("progress file already exists; use --resume to continue it")
     if requests_per_second is not None:
         configure_rate_limit(model, requests_per_second)
     try:
-        return _run_pipeline(
-            db_path,
-            model=model,
-            dry_run=dry_run,
-            max_workers=max_workers,
-            progress_file=progress_file,
-            resume=resume,
-        )
+        with _progress_lock(progress_file):
+            if progress_file is not None and not resume and Path(progress_file).exists():
+                raise ValueError("progress file already exists; use --resume to continue it")
+            return _run_pipeline(
+                db_path,
+                model=model,
+                dry_run=dry_run,
+                max_workers=max_workers,
+                progress_file=progress_file,
+                resume=resume,
+            )
     finally:
         if requests_per_second is not None:
             configure_rate_limit(model, None)
@@ -177,11 +188,33 @@ def _result_from_saved(value: dict) -> dict:
     return {"issue": issue, "prompt": prompt, "response": Response(**response)}
 
 
+@contextmanager
+def _progress_lock(path: str | Path | None):
+    """Serialize pipeline owners that share a checkpoint file."""
+    if path is None:
+        yield
+        return
+    checkpoint = Path(path)
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = checkpoint.with_name(f".{checkpoint.name}.lock")
+    with lock_path.open("a", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
 def _load_progress(path: Path) -> dict:
     if not path.exists():
         return {}
-    with path.open(encoding="utf-8") as stream:
-        data = json.load(stream)
+    try:
+        with path.open(encoding="utf-8") as stream:
+            data = json.load(stream)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid progress file JSON: {exc.msg}") from exc
+    except OSError as exc:
+        raise ValueError(f"cannot read progress file: {exc}") from exc
     if not isinstance(data, dict) or data.get("version") != 1 or not isinstance(data.get("items"), dict):
         raise ValueError("invalid progress file (expected version 1)")
     items = data["items"]
@@ -198,15 +231,18 @@ def _load_progress(path: Path) -> dict:
 
 
 def _write_progress(path: Path, items: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps({"version": 1, "items": items}, indent=2, sort_keys=True)
-    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent), text=True)
+    temporary = None
     try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps({"version": 1, "items": items}, indent=2, sort_keys=True)
+        fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent), text=True)
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
+    except OSError as exc:
+        raise ValueError(f"cannot write progress file: {exc}") from exc
     finally:
-        if os.path.exists(temporary):
+        if temporary is not None and os.path.exists(temporary):
             os.unlink(temporary)
