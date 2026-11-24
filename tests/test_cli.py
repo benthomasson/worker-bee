@@ -61,6 +61,13 @@ def test_run_forwards_progress_options(tmp_path):
     )
 
 
+def test_run_forwards_workspace_root(tmp_path):
+    workspace = str(tmp_path)
+    with patch("worker_bee.pipeline.run_pipeline") as run:
+        assert main(["run", "brain.db", "--workspace-root", workspace]) == 0
+    assert run.call_args.kwargs["workspace_root"] == workspace
+
+
 def test_run_forwards_acceptance_gates():
     with patch("worker_bee.pipeline.run_pipeline") as run:
         assert main(["run", "brain.db", "--require-reviewed", "--require-verified"]) == 0

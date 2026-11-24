@@ -2,15 +2,22 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from worker_bee.tokens import count_tokens
+from worker_bee.workspace import get_workspace_root, workspace_path
 
 
 DEFAULT_TOKEN_BUDGET = 56000
 
 
-def build_prompt(issue: dict, *, token_budget: int = DEFAULT_TOKEN_BUDGET) -> str:
+def build_prompt(
+    issue: dict,
+    *,
+    token_budget: int = DEFAULT_TOKEN_BUDGET,
+    workspace_root: str | Path | None = None,
+) -> str:
     """Build a self-contained prompt for a single issue.
 
     Returns a prompt string ready to send to a model.
@@ -18,7 +25,7 @@ def build_prompt(issue: dict, *, token_budget: int = DEFAULT_TOKEN_BUDGET) -> st
     parts = [
         _system_section(issue),
         _belief_section(issue),
-        _source_section(issue, token_budget),
+        _source_section(issue, token_budget, workspace_root=workspace_root),
         _task_section(issue),
     ]
     return "\n\n".join(p for p in parts if p)
@@ -45,7 +52,12 @@ def _belief_section(issue: dict) -> str:
     return "\n".join(lines)
 
 
-def _source_section(issue: dict, token_budget: int) -> str:
+def _source_section(
+    issue: dict,
+    token_budget: int,
+    *,
+    workspace_root: str | Path | None = None,
+) -> str:
     sources = issue.get("source_files", [])
     if not sources:
         return ""
@@ -53,13 +65,33 @@ def _source_section(issue: dict, token_budget: int) -> str:
     parts = []
     tokens_used = 0
 
+    root = (Path(workspace_root).expanduser().resolve()
+            if workspace_root is not None else get_workspace_root())
+    if not root.is_dir():
+        raise ValueError(f"workspace root is not a directory: {workspace_root}")
+
     for src in sources:
-        p = Path(src)
-        if not p.exists():
+        # Validate before opening.  In particular, missing absolute paths are
+        # not allowed to bypass the workspace check.
+        p = workspace_path(src, root=root)
+        # Keep the lexical path for descriptor-based opening; ``workspace_path``
+        # resolves it only to validate containment, which would otherwise hide
+        # a symlink that must be rejected by O_NOFOLLOW.
+        lexical = Path(src).expanduser()
+        if not lexical.is_absolute():
+            lexical = root / lexical
+        try:
+            fd = _open_confined(root, lexical)
+        except FileNotFoundError:
             parts.append(f"## Source: {src}\n[file not found]")
             continue
+        except OSError as exc:
+            if exc.errno == getattr(os, "ELOOP", 40):
+                raise ValueError(f"source is a symlink: {src}") from exc
+            raise
 
-        content = p.read_text(errors="replace")
+        with os.fdopen(fd, "r", encoding="utf-8", errors="replace") as stream:
+            content = stream.read()
         content_tokens = count_tokens(content)
         if tokens_used + content_tokens > token_budget:
             chars_remaining = (token_budget - tokens_used) * 3
@@ -74,6 +106,36 @@ def _source_section(issue: dict, token_budget: int) -> str:
             break
 
     return "\n\n".join(parts)
+
+
+def _open_confined(root: Path, path: Path) -> int:
+    """Open a source while keeping directory components beneath *root*.
+
+    O_NOFOLLOW on the final component prevents the common replacement race;
+    walking directory descriptors also prevents an intermediate directory from
+    being swapped out between resolution and open.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    root_fd = os.open(root, flags)
+    try:
+        relative = path.relative_to(root)
+        current = root_fd
+        components = relative.parts
+        for component in components[:-1]:
+            next_fd = os.open(component, flags | getattr(os, "O_NOFOLLOW", 0), dir_fd=current)
+            if current != root_fd:
+                os.close(current)
+            current = next_fd
+        if not components:
+            raise IsADirectoryError(path)
+        return os.open(
+            components[-1], os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=current
+        )
+    finally:
+        # The returned file descriptor is independent of the directory handles.
+        if 'current' in locals() and current != root_fd:
+            os.close(current)
+        os.close(root_fd)
 
 
 def _task_section(issue: dict) -> str:

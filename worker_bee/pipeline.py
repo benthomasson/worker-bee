@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+import inspect
 import json
-import os
 import sys
 import tempfile
 from contextlib import contextmanager
@@ -14,6 +14,8 @@ import fcntl
 from worker_bee.extractor import extract, filter_acceptance_gates
 from worker_bee.prompter import build_prompt
 from worker_bee.dispatcher import configure_rate_limit, dispatch_batch, Response
+from worker_bee.tools import set_workspace_root
+from worker_bee.workspace import workspace_path
 
 
 def run_pipeline(
@@ -27,6 +29,7 @@ def run_pipeline(
     resume: bool = False,
     require_reviewed: bool = True,
     require_verified: bool = True,
+    workspace_root: str | Path | None = None,
 ) -> list[dict]:
     """Run the first-milestone pipeline: extract → prompt → dispatch → print.
 
@@ -36,12 +39,20 @@ def run_pipeline(
     do not create a checkpoint.  Progress mode checkpoints items serially after
     each response; failed responses are recorded but retried on resume.
     """
+    # Configure and validate the workspace before any database or checkpoint
+    # filesystem access.  This keeps extraction and progress handling under the
+    # same boundary as prompt source reads.
+    root = _pipeline_workspace_root(db_path, progress_file, workspace_root)
+    set_workspace_root(root)
+    db_path = workspace_path(db_path)
     # Keep restart safety at the pipeline API boundary, rather than relying on
     # each caller to remember to configure a checkpoint.  An explicitly supplied
     # progress path retains its existing --resume requirement.
     if progress_file is None and not dry_run and not resume:
-        progress_file = f"{db_path}.progress.json"
+        progress_file = workspace_path(f"{db_path}.progress.json")
         resume = True
+    elif progress_file is not None:
+        progress_file = workspace_path(progress_file)
     if resume and progress_file is None:
         raise ValueError("--resume requires --progress-file")
     if dry_run and progress_file is not None:
@@ -61,6 +72,8 @@ def run_pipeline(
                 resume=resume,
                 require_reviewed=require_reviewed,
                 require_verified=require_verified,
+                workspace_root=root,
+                _workspace_configured=True,
             )
     finally:
         if requests_per_second is not None:
@@ -77,7 +90,16 @@ def _run_pipeline(
     resume: bool,
     require_reviewed: bool,
     require_verified: bool,
+    workspace_root: str | Path | None = None,
+    _workspace_configured: bool = False,
 ) -> list[dict]:
+    # Configure and validate before extraction or checkpoint access, including
+    # when this internal helper is called directly.
+    workspace_root = _pipeline_workspace_root(db_path, progress_file, workspace_root)
+    if not _workspace_configured:
+        set_workspace_root(workspace_root)
+    db_path = workspace_path(db_path)
+    progress_path = workspace_path(progress_file) if progress_file is not None else None
     extracted_issues = extract(db_path)
     extracted_issues = filter_acceptance_gates(
         db_path,
@@ -88,9 +110,23 @@ def _run_pipeline(
     keys = [_issue_key(issue) for issue in extracted_issues]
     if len(keys) != len(set(keys)):
         raise ValueError("duplicate issue keys in extracted issues")
-    progress_path = Path(progress_file) if progress_file is not None else None
     saved = _load_progress(progress_path) if resume and progress_path else {}
-    all_prompts = [(issue, build_prompt(issue)) for issue in extracted_issues]
+    # Determine builder capability once.  Besides avoiding repeated reflection,
+    # this keeps errors raised by the builder itself from being mistaken for a
+    # legacy-signature compatibility case.
+    try:
+        accepts_workspace = "workspace_root" in inspect.signature(build_prompt).parameters
+    except (TypeError, ValueError):
+        accepts_workspace = False
+    all_prompts = []
+    for issue in extracted_issues:
+        # Preserve compatibility with injected legacy prompt builders that do
+        # not accept the workspace keyword.
+        if accepts_workspace:
+            prompt = build_prompt(issue, workspace_root=workspace_root)
+        else:
+            prompt = build_prompt(issue)
+        all_prompts.append((issue, prompt))
 
     # A checkpoint is reusable only when it describes the exact current issue
     # and prompt, and contains a successful response.  This prevents a changed
@@ -162,6 +198,26 @@ def _run_pipeline(
             elif key in saved:
                 results.append(_result_from_saved(saved[key]))
     return results
+
+
+def _pipeline_workspace_root(
+    db_path: str | Path,
+    progress_file: str | Path | None,
+    workspace_root: str | Path | None,
+) -> Path:
+    if workspace_root is not None:
+        return Path(workspace_root).expanduser().resolve()
+    db = Path(db_path).expanduser().resolve()
+    if progress_file is None or not Path(progress_file).expanduser().is_absolute():
+        return db.parent
+    progress = Path(progress_file).expanduser().resolve()
+    try:
+        progress.relative_to(db.parent)
+    except ValueError as exc:
+        raise ValueError(
+            "progress file is outside the database workspace; specify workspace_root"
+        ) from exc
+    return db.parent
 
 
 def _issue_key(issue: dict) -> str:

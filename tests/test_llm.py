@@ -10,6 +10,28 @@ import pytest
 import worker_bee.llm as llm
 
 
+def test_cli_invocation_uses_configured_workspace_as_cwd(monkeypatch, tmp_path):
+    seen = {}
+
+    class Result:
+        returncode = 0
+        stdout = '{"result": "ok"}'
+        stderr = ""
+
+    monkeypatch.setattr(llm, "resolve_model_cmd", lambda model: ["claude"])
+    monkeypatch.setattr(llm.shutil, "which", lambda binary: "/usr/bin/claude")
+    monkeypatch.setattr(llm, "get_workspace_root", lambda: tmp_path)
+
+    def fake_run(*args, **kwargs):
+        seen["cwd"] = kwargs["cwd"]
+        return Result()
+
+    monkeypatch.setattr(llm.subprocess, "run", fake_run)
+    monkeypatch.setattr(llm, "_parse_cli_json", lambda output, model: "ok")
+    assert llm.invoke_model("hello", "claude") == "ok"
+    assert seen["cwd"] == tmp_path
+
+
 def test_openai_simple_invocation_normalizes_timeout(monkeypatch):
     class SDKTimeout(Exception):
         pass

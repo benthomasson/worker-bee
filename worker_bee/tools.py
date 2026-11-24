@@ -19,6 +19,8 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+from worker_bee.workspace import get_workspace_root, set_workspace_root as _configure_workspace_root
+
 
 TOOLS = [
     {
@@ -743,7 +745,6 @@ _belief_store = BeliefStore()
 # (read_file, grep, glob) resolve paths against the workspace OR any
 # read-only root; write tools (write_file, edit_file) and run_command stay
 # confined to the workspace.
-_workspace_root = Path.cwd().resolve()
 _read_only_roots: list[Path] = []
 _ALLOWED_COMMANDS = frozenset({
     "cat", "cargo", "find", "git", "grep", "ls", "python", "pytest", "pwd",
@@ -752,19 +753,8 @@ _ALLOWED_COMMANDS = frozenset({
 
 
 def set_workspace_root(path: str | os.PathLike[str] | None) -> None:
-    """Set the root directory visible to filesystem and command tools.
-
-    All filesystem paths are resolved beneath this directory.  ``None`` uses
-    the current working directory.  Symlinks are resolved before the boundary
-    check so a link cannot escape the workspace.  Resetting the workspace also
-    clears any previously configured read-only paths — they must be re-added
-    with :func:`set_read_only_paths` for each new workspace.
-    """
-    global _workspace_root
-    root = Path.cwd() if path is None else Path(path)
-    _workspace_root = root.expanduser().resolve()
-    if not _workspace_root.is_dir():
-        raise ValueError(f"workspace root is not a directory: {path}")
+    """Set the tool workspace and clear previously granted read-only roots."""
+    _configure_workspace_root(path)
     _read_only_roots.clear()
 
 
@@ -791,7 +781,7 @@ def set_read_only_paths(paths: str | os.PathLike[str] | list[str | os.PathLike[s
         if not resolved.is_dir():
             raise ValueError(f"read-only path is not a directory: {entry}")
         try:
-            resolved.relative_to(_workspace_root)
+            resolved.relative_to(get_workspace_root())
         except ValueError:
             pass  # fine — it is outside the workspace
         else:
@@ -806,7 +796,7 @@ def set_read_only_paths(paths: str | os.PathLike[str] | list[str | os.PathLike[s
 
 def _any_allowed_root(path: Path) -> Path | None:
     """Return the root (workspace or read-only) containing ``path``, if any."""
-    for root in (_workspace_root, *_read_only_roots):
+    for root in (get_workspace_root(), *_read_only_roots):
         try:
             path.relative_to(root)
         except ValueError:
@@ -818,7 +808,7 @@ def _any_allowed_root(path: Path) -> Path | None:
 def _workspace_path(path: str | os.PathLike[str], *, read_only_allowed: bool = True) -> Path:
     candidate = Path(path).expanduser()
     lexical = Path(os.path.abspath(candidate if candidate.is_absolute()
-                                  else _workspace_root / candidate))
+                                  else get_workspace_root() / candidate))
     resolved = lexical.resolve()
     if read_only_allowed:
         if _any_allowed_root(resolved) is None:
@@ -827,7 +817,7 @@ def _workspace_path(path: str | os.PathLike[str], *, read_only_allowed: bool = T
         # component and reject a symlink swap after this validation.
         return lexical
     try:
-        resolved.relative_to(_workspace_root)
+        resolved.relative_to(get_workspace_root())
     except ValueError as exc:
         raise ValueError(f"path is outside workspace: {path}") from exc
     # Keep the lexical path for writes so the atomic writer can reject a

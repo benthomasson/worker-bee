@@ -20,7 +20,10 @@ import threading
 import urllib.error
 import urllib.request
 from contextvars import ContextVar
+
 from dataclasses import dataclass, field
+
+from worker_bee.workspace import get_workspace_root
 
 try:
     from langchain_anthropic import ChatAnthropic
@@ -402,6 +405,7 @@ def invoke_model(prompt: str, model: str = "claude", timeout: int = 300) -> str:
             text=True,
             timeout=timeout,
             env=env,
+            cwd=get_workspace_root(),
         )
     except Exception:
         _record_failed_call(model)

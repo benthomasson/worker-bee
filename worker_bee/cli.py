@@ -131,6 +131,8 @@ def _main(argv: list[str] | None = None) -> int:
 
     sub_run = subparsers.add_parser("run", help="Run the full pipeline on a belief database")
     sub_run.add_argument("db", help="Path to reasons.db")
+    sub_run.add_argument("--workspace-root", default=None, metavar="DIR",
+                         help="Workspace directory used to resolve source files and run model CLIs")
     sub_run.add_argument("--model", default="ollama:qwen3.8:27b", help="Model to use (e.g. ollama:qwen3.8:27b, openai:gpt-4o, api:claude-sonnet-4-20250514)")
     sub_run.add_argument("--dry-run", action="store_true", help="Print prompts without dispatching")
     sub_run.add_argument("--requests-per-second", type=float, default=None,
@@ -350,16 +352,18 @@ def _main(argv: list[str] | None = None) -> int:
         if progress_file is None and not args.dry_run:
             progress_file = f"{args.db}.progress.json"
             resume = True
-        run_pipeline(
-            args.db,
-            model=args.model,
-            dry_run=args.dry_run,
-            requests_per_second=args.requests_per_second,
-            progress_file=progress_file,
-            resume=resume,
-            require_reviewed=args.require_reviewed,
-            require_verified=args.require_verified,
-        )
+        pipeline_options = {
+            "model": args.model,
+            "dry_run": args.dry_run,
+            "requests_per_second": args.requests_per_second,
+            "progress_file": progress_file,
+            "resume": resume,
+            "require_reviewed": args.require_reviewed,
+            "require_verified": args.require_verified,
+        }
+        if args.workspace_root is not None:
+            pipeline_options["workspace_root"] = args.workspace_root
+        run_pipeline(args.db, **pipeline_options)
         return 0
 
     return 0
