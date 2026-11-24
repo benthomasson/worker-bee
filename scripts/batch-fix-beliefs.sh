@@ -87,7 +87,7 @@ for belief in "${BELIEFS[@]}"; do
         if grep -q "SUCCESS: Belief retracted" "$LOG_FILE"; then
             FIXED+=("$belief")
             echo "  → FIXED"
-        elif grep -q "Auto-retracting belief" "$LOG_FILE"; then
+        elif grep -q "NOT VERIFIED" "$LOG_FILE"; then
             RETRACTED+=("$belief")
             echo "  → AUTO-RETRACTED"
         else

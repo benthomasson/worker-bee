@@ -115,20 +115,13 @@ VERIFY_OUTPUT=$(cd "$REPO" && uv run worker-bee verify "$DB" "$BELIEF_ID" \
     --project-dir "$REPO" \
     --model "$MODEL" \
     --max-turns "$MAX_TURNS" \
-    --num-ctx "$NUM_CTX" 2>&1) || true
+    --num-ctx "$NUM_CTX" \
+    --retract 2>&1) || true
 echo "$VERIFY_OUTPUT"
 
 if echo "$VERIFY_OUTPUT" | grep -q "NOT VERIFIED"; then
-    EVIDENCE=$(echo "$VERIFY_OUTPUT" | grep "Evidence:" | head -1 | sed 's/.*Evidence: //')
-    JUSTIFICATION=$(echo "$VERIFY_OUTPUT" | grep "Justification:" | head -1 | sed 's/.*Justification: //')
     echo ""
-    echo "Belief is NOT VERIFIED."
-
-    step "Auto-retracting belief based on agentic verification"
-    reasonsforge --db "$DB" retract "$BELIEF_ID" \
-        --reason "Auto-retracted: NOT VERIFIED. ${JUSTIFICATION:-$EVIDENCE}" \
-        2>&1 || true
-
+    echo "Belief is NOT VERIFIED and retracted by verifier."
     exit 0
 fi
 
