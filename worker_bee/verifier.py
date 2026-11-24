@@ -246,13 +246,6 @@ def verify_belief(
 
     trace = trace_belief(db_path, belief_id, project_dir=project_dir)
 
-    if not trace.summary_text:
-        return VerifyResult(
-            belief_id=trace.belief_id, belief_text=trace.belief_text,
-            source=trace.source, code_refs=trace.code_refs,
-            code_found=trace.code_found, code_missing=trace.code_missing,
-        )
-
     hints = ""
     if trace.code_refs:
         hints = "## Hints — files referenced in the source summary\n"
@@ -261,10 +254,12 @@ def verify_belief(
             found = "(found)" if ref in trace.code_found else "(not resolved)"
             hints += f"- {ref} {found}\n"
 
+    summary = trace.summary_text or "(No source summary available. Use your tools to explore the codebase and find the relevant code.)"
+
     task = VERIFY_SYSTEM_PROMPT.format(
         belief_id=trace.belief_id,
         belief_text=trace.belief_text,
-        summary=trace.summary_text,
+        summary=summary,
         initial_hints=hints,
     )
 
