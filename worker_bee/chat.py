@@ -32,8 +32,10 @@ preserved between prompts. To remember things across prompts:
 
 - Use list_notes at the start of every task to recall what previous rounds
   recorded. Do NOT redo work that is already noted.
-- Use write_note to record findings as you work. Notes are PERSISTENT —
-  they survive across prompts and sessions.
+- Use write_note to record findings as you work. Give each note a
+  descriptive kebab-case name (e.g. 'findings-from-tools-py',
+  'open-questions'). Notes are PERSISTENT — they survive across prompts
+  and sessions, and each has a stable name for update_note / delete_note.
 - Use add_belief to record durable conclusions, discoveries, or claims.
   Notes are scratch; beliefs are knowledge.
 - Use search_beliefs to recall prior beliefs.

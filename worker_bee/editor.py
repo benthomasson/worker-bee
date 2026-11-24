@@ -40,13 +40,15 @@ grows. To preserve your work:
 - At the start of a session, call list_notes to see anything a previous
   session recorded — do not redo work that has already been noted down.
 - After reading each file, immediately use write_note to record what you
-  learned. Do NOT read another file until you have noted your findings.
+  learned. Give each note a descriptive kebab-case name (e.g.
+  'findings-from-tools-py', 'plan-for-refactoring'). Do NOT read another
+  file until you have noted your findings.
 - Use list_memory and retrieve_memory to recall earlier findings that may
   have scrolled out of context within this session.
 - Notes are PERSISTENT: they are saved to a shared project-level notes
   file (usually .worker-bee/notes.jsonl) and reloaded at the start of the
-  next session. Use list_notes / update_note / delete_note to manage them
-  across sessions.
+  next session. Each note has a stable name — use it with update_note and
+  delete_note to manage notes across sessions.
 - For durable conclusions, discoveries, or claims you can support, graduate
   them out of notes and into the belief database with add_belief. Notes are
   scratch; beliefs are knowledge.
@@ -76,15 +78,17 @@ grows. To preserve your work:
 - At the start of a session, call list_notes to see anything a previous
   session recorded — do not redo work that has already been noted down.
 - After reading each file, immediately use write_note to record what you
-  learned. Do NOT read another file until you have noted your findings.
+  learned. Give each note a descriptive kebab-case name (e.g.
+  'findings-from-tools-py', 'plan-for-refactoring'). Do NOT read another
+  file until you have noted your findings.
 - Use add_belief to record conclusions, discoveries, or claims you can
   support. Each belief should be a single atomic claim.
 - Use list_memory and retrieve_memory to recall earlier findings that may
   have scrolled out of context within this session.
 - Notes are PERSISTENT: they are saved to a shared project-level notes
   file (usually .worker-bee/notes.jsonl) and reloaded at the start of the
-  next session. Use list_notes / update_note / delete_note to manage them
-  across sessions.
+  next session. Each note has a stable name — use it with update_note and
+  delete_note to manage notes across sessions.
 - For durable conclusions, graduate them out of notes and into the belief
   database with add_belief. Notes are scratch; beliefs are knowledge.
 
@@ -148,8 +152,8 @@ class SessionMemory:
         self._tool_calls: list[dict] = []
         # Mirror the persistent notes in-memory so list_memory can show them
         # without re-reading the file each call.
-        self._notes: list[str] = (
-            [e["note"] for e in notes_store.list()]
+        self._notes: list[dict] = (
+            [{"name": e.get("name", ""), "note": e["note"]} for e in notes_store.list()]
             if notes_store is not None and notes_store.enabled
             else []
         )
@@ -158,7 +162,10 @@ class SessionMemory:
     def refresh_notes(self) -> None:
         """Refresh the in-memory note mirror from the persistent store."""
         if self.notes_store is not None and self.notes_store.enabled:
-            self._notes = [entry["note"] for entry in self.notes_store.list()]
+            self._notes = [
+                {"name": e.get("name", ""), "note": e["note"]}
+                for e in self.notes_store.list()
+            ]
 
     def record_tool_call(self, turn: int, name: str, tool_input: dict, result: str) -> int:
         entry_id = len(self._tool_calls)
@@ -182,8 +189,9 @@ class SessionMemory:
         if self._notes:
             lines.append("")
             lines.append(f"Notes ({len(self._notes)} total):")
-            for i, note in enumerate(self._notes):
-                lines.append(f"  [{i}] {note}")
+            for entry in self._notes:
+                name = entry.get("name", "?")
+                lines.append(f"  [{name}] {entry['note']}")
             if self.notes_store is not None and self.notes_store.enabled:
                 lines.append(f"  (persistent store: {self.notes_store.path})")
         return "\n".join(lines)
@@ -197,23 +205,22 @@ class SessionMemory:
             result = result[:4000] + f"\n\n... ({len(result) - 4000} chars truncated)"
         return f"#{tc['id']} {tc['name']}(turn {tc['turn']})\n\n{result}"
 
-    def add_note(self, note: str) -> str:
+    def add_note(self, note: str, name: str | None = None) -> str:
         """Add a note. Routes through the persistent store if configured."""
         if self.notes_store is not None and self.notes_store.enabled:
             try:
-                idx = self.notes_store.add(note)
+                result_name = self.notes_store.add(note, name=name)
             except Exception as e:
-                # Fall back to in-memory only rather than losing the note, but
-                # expose the persistence failure to the editor status/logging.
-                self._notes.append(note)
+                self._notes.append({"name": name or "?", "note": note})
                 return ToolResult(
                     f"Note saved in-memory only (persistence error: {e}). "
                     f"({len(self._notes)} total)",
                     ok=False,
                 )
             self.refresh_notes()
-            return f"Note saved. ({idx + 1} total) [persisted to {self.notes_store.path}]"
-        self._notes.append(note)
+            total = len(self._notes)
+            return f"Note '{result_name}' saved. ({total} total) [persisted to {self.notes_store.path}]"
+        self._notes.append({"name": name or "?", "note": note})
         return f"Note saved. ({len(self._notes)} total)"
 
     @staticmethod
@@ -444,7 +451,10 @@ def run_edit_loop(
             elif block.name == "retrieve_memory":
                 result_text = memory.retrieve(block.input.get("id", -1))
             elif block.name == "write_note":
-                result_text = memory.add_note(block.input.get("note", ""))
+                result_text = memory.add_note(
+                    block.input.get("note", ""),
+                    name=block.input.get("name"),
+                )
             elif block.name in ("list_notes", "update_note", "delete_note"):
                 result_text = execute_tool(block.name, block.input)
                 memory.refresh_notes()
@@ -550,8 +560,10 @@ def _print_tool_call(block: ToolUseBlock) -> None:
     elif block.name == "retrieve_memory":
         print(f"  -> retrieve_memory(#{block.input.get('id', '?')})", file=sys.stderr)
     elif block.name == "write_note":
+        note_name = block.input.get("name", "")
         note = block.input.get("note", "")
-        print(f"  -> write_note({note[:80]!r})", file=sys.stderr)
+        label = f"{note_name}: " if note_name else ""
+        print(f"  -> write_note({label}{note[:80]!r})", file=sys.stderr)
     elif block.name == "ask_user_question":
         print(f"  -> ask_user_question()", file=sys.stderr)
     elif block.name == "show_belief":
@@ -565,9 +577,9 @@ def _print_tool_call(block: ToolUseBlock) -> None:
     elif block.name == "list_notes":
         print(f"  -> list_notes()", file=sys.stderr)
     elif block.name == "update_note":
-        print(f"  -> update_note([{block.input.get('index', '?')}])", file=sys.stderr)
+        print(f"  -> update_note({block.input.get('name', '?')})", file=sys.stderr)
     elif block.name == "delete_note":
-        print(f"  -> delete_note([{block.input.get('index', '?')}])", file=sys.stderr)
+        print(f"  -> delete_note({block.input.get('name', '?')})", file=sys.stderr)
     else:
         print(f"  -> {block.name}({block.input})", file=sys.stderr)
 

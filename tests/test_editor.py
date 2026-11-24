@@ -16,7 +16,7 @@ class _FailingNotesStore:
     def list(self):
         return []
 
-    def add(self, _note):
+    def add(self, _note, name=None):
         raise OSError("disk full")
 
 
@@ -48,17 +48,17 @@ def test_session_memory_refreshes_after_note_mutations(tmp_path):
     set_notes_file(str(tmp_path / "notes.jsonl"))
     try:
         store = editor.get_notes_store()
-        store.add("first")
-        store.add("second")
+        store.add("first", name="note-first")
+        store.add("second", name="note-second")
         memory = editor.SessionMemory(notes_store=store)
 
-        execute_tool("update_note", {"index": 0, "note": "updated"})
+        execute_tool("update_note", {"name": "note-first", "note": "updated"})
         memory.refresh_notes()
-        assert memory._notes == ["updated", "second"]
+        assert [e["note"] for e in memory._notes] == ["updated", "second"]
 
-        execute_tool("delete_note", {"index": 0})
+        execute_tool("delete_note", {"name": "note-first"})
         memory.refresh_notes()
-        assert memory._notes == ["second"]
+        assert [e["note"] for e in memory._notes] == ["second"]
         assert "second" in memory.list_calls()
         assert "updated" not in memory.list_calls()
     finally:
@@ -69,12 +69,12 @@ def test_run_edit_loop_refreshes_memory_after_note_mutation(tmp_path, monkeypatc
     notes_path = tmp_path / "notes.jsonl"
     set_notes_file(str(notes_path))
     try:
-        editor.get_notes_store().add("before")
+        editor.get_notes_store().add("before", name="test-note")
         monkeypatch.setattr(editor, "DEFAULT_NOTES_PATH", str(notes_path))
         responses = iter([
             ChatResponse(
                 content=[ToolUseBlock(
-                    "tool-1", "update_note", {"index": 0, "note": "after"},
+                    "tool-1", "update_note", {"name": "test-note", "note": "after"},
                 )],
                 stop_reason="tool_use",
             ),
@@ -102,7 +102,7 @@ def test_run_edit_loop_refreshes_memory_after_note_mutation(tmp_path, monkeypatc
         assert len(memory_results) == 1
         memory_result = memory_results[0]
         assert memory_result is not None
-        assert "[0] after" in memory_result
+        assert "[test-note] after" in memory_result
         assert "before" not in memory_result
     finally:
         set_notes_file(None)

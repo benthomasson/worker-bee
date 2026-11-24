@@ -191,18 +191,26 @@ TOOLS = [
     {
         "name": "write_note",
         "description": (
-            "Write a note to yourself for later reference. Notes are stored in "
-            "a persistent project-level notes file (survives context eviction "
-            "AND is reloaded at the start of future sessions), and also in the "
-            "in-memory session store. Use this to record intermediate findings, "
-            "decisions, or plans so you don't have to re-derive them if earlier "
-            "turns are evicted — or if you come back next session. "
+            "Write a named note to yourself for later reference. Notes are "
+            "stored in a persistent project-level notes file (survives context "
+            "eviction AND is reloaded at the start of future sessions). "
+            "Each note has a kebab-case name (e.g. 'plan-for-refactoring', "
+            "'open-questions') that stays stable across sessions — use it to "
+            "update or delete the note later. Names must be unique. "
             "For durable conclusions you want to keep long-term, prefer "
             "add_belief instead: notes are scratch, beliefs are knowledge."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
+                "name": {
+                    "type": "string",
+                    "description": (
+                        "Short kebab-case slug for the note "
+                        "(e.g. 'plan-for-refactoring', 'open-questions'). "
+                        "Must be unique. If omitted, auto-derived from text."
+                    ),
+                },
                 "note": {
                     "type": "string",
                     "description": "The note to store",
@@ -215,10 +223,10 @@ TOOLS = [
         "name": "list_notes",
         "description": (
             "List all persistent notes from the project-level notes store. "
-            "Returns the notes with their index (0-based), timestamp, and "
-            "text. Use this at the start of a session or when you need to "
+            "Returns each note with its name, timestamp, and text. "
+            "Use this at the start of a session or when you need to "
             "recall what you or a previous session wrote down. "
-            "Indexes are stable: use them with update_note and delete_note."
+            "Use the name with update_note and delete_note."
         ),
         "input_schema": {
             "type": "object",
@@ -233,41 +241,40 @@ TOOLS = [
     {
         "name": "update_note",
         "description": (
-            "Replace an existing persistent note at the given index. "
-            "Use list_notes first to find the index. Returns confirmation "
+            "Replace an existing persistent note identified by name. "
+            "Use list_notes first to find the name. Returns confirmation "
             "with the new note text."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "index": {
-                    "type": "integer",
-                    "description": "0-based index of the note to replace (from list_notes)",
+                "name": {
+                    "type": "string",
+                    "description": "The kebab-case name of the note to update (from list_notes)",
                 },
                 "note": {
                     "type": "string",
                     "description": "The replacement note text",
                 },
             },
-            "required": ["index", "note"],
+            "required": ["name", "note"],
         },
     },
     {
         "name": "delete_note",
         "description": (
-            "Remove a persistent note at the given index from the notes store. "
-            "Use list_notes first to find the index. Other notes' indexes shift "
-            "down after deletion."
+            "Remove a persistent note identified by name from the notes store. "
+            "Use list_notes first to find the name."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "index": {
-                    "type": "integer",
-                    "description": "0-based index of the note to delete (from list_notes)",
+                "name": {
+                    "type": "string",
+                    "description": "The kebab-case name of the note to delete (from list_notes)",
                 },
             },
-            "required": ["index"],
+            "required": ["name"],
         },
     },
 ]
@@ -543,7 +550,13 @@ class NoteStore:
     (default: .worker-bee/notes.jsonl). The same store can be reused across
     chat rounds and sessions so notes survive beyond a single edit loop.
 
-    Each entry has the shape: {"ts": <iso-timestamp>, "note": <text>}.
+    Each entry has the shape:
+        {"ts": <iso-timestamp>, "note": <text>, "name": <kebab-case-slug>}
+
+    Notes are addressed by their ``name`` — a short kebab-case slug chosen
+    by the caller (e.g. ``plan-for-refactoring``, ``open-questions``).
+    Names are unique within the store; adding a note whose name already
+    exists raises ``ValueError``.
     """
 
     def __init__(self, path: str | None = DEFAULT_NOTES_PATH,
@@ -556,12 +569,22 @@ class NoteStore:
     def enabled(self) -> bool:
         return self.path is not None
 
+    @staticmethod
+    def _slugify(text: str) -> str:
+        """Derive a kebab-case slug from arbitrary text."""
+        import re
+        slug = text.lower().strip()
+        slug = re.sub(r"[^a-z0-9]+", "-", slug)
+        slug = slug.strip("-")
+        return slug[:60] or "note"
+
     def _load(self) -> list[dict]:
         if not self.path:
             return []
         if not self.path.exists():
             return []
         notes: list[dict] = []
+        seen_names: set[str] = set()
         try:
             with open(self.path, "r") as f:
                 for line in f:
@@ -571,6 +594,14 @@ class NoteStore:
                     try:
                         entry = json.loads(line)
                         if isinstance(entry, dict) and "note" in entry:
+                            if "name" not in entry:
+                                entry["name"] = self._slugify(entry["note"])
+                            base = entry["name"]
+                            suffix = 2
+                            while entry["name"] in seen_names:
+                                entry["name"] = f"{base}-{suffix}"
+                                suffix += 1
+                            seen_names.add(entry["name"])
                             notes.append(entry)
                     except json.JSONDecodeError:
                         continue
@@ -583,29 +614,41 @@ class NoteStore:
             return
         text = "".join(json.dumps(entry, ensure_ascii=False) + "\n"
                        for entry in self._notes)
-        # Atomic replace: on success the file is complete; on failure the
-        # previous file (if any) is left intact and the error propagates so
-        # callers can roll back their in-memory state and report the failure.
         _atomic_write_text(self.path, text)
+
+    def _find(self, name: str) -> int:
+        """Return the index of the note with the given name, or raise KeyError."""
+        for i, entry in enumerate(self._notes):
+            if entry.get("name") == name:
+                return i
+        raise KeyError(f"no note named '{name}'")
 
     def list(self) -> list[dict]:
         return list(self._notes)
 
-    def add(self, note: str) -> int:
-        """Append a note. Returns its index in the store.
+    def add(self, note: str, name: str | None = None) -> str:
+        """Append a note. Returns its name.
 
         Raises on persistence failure: the in-memory state is rolled back so
         it never diverges from what is actually on disk.
         """
         if not note or not note.strip():
             raise ValueError("note text is empty")
+        if name is None:
+            name = self._slugify(note)
+        existing_names = {e.get("name") for e in self._notes}
+        if name in existing_names:
+            raise ValueError(
+                f"a note named '{name}' already exists; "
+                f"use update_note to modify it, or choose a different name"
+            )
         entry = {
             "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "note": note,
+            "name": name,
         }
         previous = [dict(e) for e in self._notes]
         self._notes.append(entry)
-        # Cap the history: rotate out the oldest entries beyond the cap.
         if self.max_notes and len(self._notes) > self.max_notes:
             self._notes = self._notes[-self.max_notes:]
         try:
@@ -613,7 +656,7 @@ class NoteStore:
         except BaseException:
             self._notes = previous
             raise
-        return len(self._notes) - 1
+        return name
 
     def get(self, index: int) -> dict:
         if index < 0 or index >= len(self._notes):
@@ -621,6 +664,9 @@ class NoteStore:
                 f"note index {index} out of range (0..{len(self._notes) - 1})"
             )
         return self._notes[index]
+
+    def get_by_name(self, name: str) -> dict:
+        return self._notes[self._find(name)]
 
     def update(self, index: int, note: str) -> dict:
         if not note or not note.strip():
@@ -636,6 +682,9 @@ class NoteStore:
             raise
         return entry
 
+    def update_by_name(self, name: str, note: str) -> dict:
+        return self.update(self._find(name), note)
+
     def delete(self, index: int) -> int:
         self.get(index)  # validates range
         previous = [dict(e) for e in self._notes]
@@ -646,6 +695,9 @@ class NoteStore:
             self._notes = previous
             raise
         return len(self._notes)
+
+    def delete_by_name(self, name: str) -> int:
+        return self.delete(self._find(name))
 
 
 class BeliefStore:
@@ -1106,9 +1158,9 @@ def _execute_tool(name: str, tool_input: dict) -> str:
     elif name == "list_notes":
         return _list_notes(limit=tool_input.get("limit", 50))
     elif name == "update_note":
-        return _update_note(tool_input.get("index", -1), tool_input.get("note", ""))
+        return _update_note(tool_input.get("name", ""), tool_input.get("note", ""))
     elif name == "delete_note":
-        return _delete_note(tool_input.get("index", -1))
+        return _delete_note(tool_input.get("name", ""))
     else:
         return f"Unknown tool: {name}"
 
@@ -1239,17 +1291,16 @@ def get_notes_store() -> NoteStore | None:
     return _active_notes
 
 
-def _write_note(note: str) -> str:
+def _write_note(note: str, name: str | None = None) -> str:
     if not note or not note.strip():
         return "Error: note text is empty"
     if _active_notes is None:
-        # No persistent store configured. Still accept the call — return a
-        # message so the LLM knows persistence is off for this run.
         return "Note stored in-memory only (no --notes path configured for this session). " \
                "It will not be visible to future sessions."
     try:
-        idx = _active_notes.add(note)
-        return f"Note saved. ({idx + 1} total) [persisted to {_active_notes.path}]"
+        result_name = _active_notes.add(note, name=name or None)
+        total = len(_active_notes.list())
+        return f"Note '{result_name}' saved. ({total} total) [persisted to {_active_notes.path}]"
     except Exception as e:
         return f"Error writing note: {e}"
 
@@ -1257,45 +1308,44 @@ def _write_note(note: str) -> str:
 def _list_notes(limit: int = 50) -> str:
     if _active_notes is None or not _active_notes.enabled:
         return "No persistent notes configured for this session."
-    notes = _active_notes.list()
-    if not notes:
-        return "No notes yet."
-    if limit > 0:
-        notes = notes[-limit:]
-        offset = 0  # we keep the original indexes by computing them below
-    # Compute real indexes into the full store so update/delete keep working.
     full = _active_notes.list()
+    if not full:
+        return "No notes yet."
+    notes = full[-limit:] if limit > 0 else full
     lines = []
-    for i, entry in enumerate(full):
-        if limit > 0 and i < len(full) - limit:
-            continue
+    for entry in notes:
         ts = entry.get("ts", "")
-        lines.append(f"[{i}] {ts}  {entry['note']}")
+        name = entry.get("name", "?")
+        lines.append(f"[{name}] {ts}  {entry['note']}")
     header = f"{len(full)} persistent note(s) in {_active_notes.path}:"
     return header + "\n" + "\n".join(lines)
 
 
-def _update_note(index: int, note: str) -> str:
+def _update_note(name: str, note: str) -> str:
     if _active_notes is None or not _active_notes.enabled:
         return "Error: no persistent notes store configured for this session"
     if not note or not note.strip():
         return "Error: note text is empty"
+    if not name:
+        return "Error: note name is required"
     try:
-        entry = _active_notes.update(int(index), note)
-        return f"Updated note [{index}]: {entry['note'][:120]}"
-    except IndexError as e:
+        entry = _active_notes.update_by_name(name, note)
+        return f"Updated note [{name}]: {entry['note'][:120]}"
+    except KeyError as e:
         return f"Error: {e}"
     except Exception as e:
         return f"Error updating note: {e}"
 
 
-def _delete_note(index: int) -> str:
+def _delete_note(name: str) -> str:
     if _active_notes is None or not _active_notes.enabled:
         return "Error: no persistent notes store configured for this session"
+    if not name:
+        return "Error: note name is required"
     try:
-        remaining = _active_notes.delete(int(index))
-        return f"Deleted note. ({remaining} remaining)"
-    except IndexError as e:
+        remaining = _active_notes.delete_by_name(name)
+        return f"Deleted note '{name}'. ({remaining} remaining)"
+    except KeyError as e:
         return f"Error: {e}"
     except Exception as e:
         return f"Error deleting note: {e}"

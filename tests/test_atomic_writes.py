@@ -192,12 +192,13 @@ def _note_store(tmp_path):
 
 def test_notes_add_persists_atomically(tmp_path):
     store = _note_store(tmp_path)
-    idx = store.add("first note")
-    assert idx == 0
+    name = store.add("first note", name="first-note")
+    assert name == "first-note"
     path = Path(store.path)
     assert path.exists()
     lines = [json.loads(l) for l in path.read_text().splitlines() if l]
     assert lines[0]["note"] == "first note"
+    assert lines[0]["name"] == "first-note"
 
 
 def test_notes_flush_is_atomic_replace(tmp_path):
@@ -205,7 +206,7 @@ def test_notes_flush_is_atomic_replace(tmp_path):
     partial writes, no trailing garbage)."""
     store = _note_store(tmp_path)
     for n in ("one", "two", "three"):
-        store.add(n)
+        store.add(n, name=n)
     lines = [json.loads(l) for l in Path(store.path).read_text().splitlines() if l]
     assert [e["note"] for e in lines] == ["one", "two", "three"]
 
@@ -214,14 +215,14 @@ def test_notes_add_failure_rolls_back_memory_and_leaves_file_intact(
     tmp_path, monkeypatch
 ):
     store = _note_store(tmp_path)
-    store.add("seed note")
+    store.add("seed note", name="seed")
     path = Path(store.path)
     before = path.read_text()
     memory_before = [dict(e) for e in store._notes]
 
     _force_rename_failure(monkeypatch)
     with pytest.raises(OSError):
-        store.add("will not persist")
+        store.add("will not persist", name="fail")
 
     assert path.read_text() == before, "existing notes file must be untouched"
     assert [dict(e) for e in store._notes] == memory_before, (
@@ -231,13 +232,13 @@ def test_notes_add_failure_rolls_back_memory_and_leaves_file_intact(
 
 def test_notes_update_failure_rolls_back(tmp_path, monkeypatch):
     store = _note_store(tmp_path)
-    store.add("original")
+    store.add("original", name="orig")
     path = Path(store.path)
     before = path.read_text()
 
     _force_rename_failure(monkeypatch)
     with pytest.raises(OSError):
-        store.update(0, "mutated")
+        store.update_by_name("orig", "mutated")
 
     assert path.read_text() == before
     assert store._notes[0]["note"] == "original"
@@ -245,15 +246,15 @@ def test_notes_update_failure_rolls_back(tmp_path, monkeypatch):
 
 def test_notes_delete_failure_rolls_back(tmp_path, monkeypatch):
     store = _note_store(tmp_path)
-    store.add("a")
-    store.add("b")
+    store.add("a", name="note-a")
+    store.add("b", name="note-b")
     path = Path(store.path)
     before = path.read_text()
     count_before = len(store._notes)
 
     _force_rename_failure(monkeypatch)
     with pytest.raises(OSError):
-        store.delete(0)
+        store.delete_by_name("note-a")
 
     assert path.read_text() == before
     assert len(store._notes) == count_before
@@ -281,17 +282,17 @@ def test_tool_write_note_surfaces_persistence_failure(tmp_path, monkeypatch):
 
 def test_tool_update_note_surfaces_persistence_failure(tmp_path, monkeypatch):
     store = tools.get_notes_store()
-    store.add("a")
+    store.add("a", name="test-a")
     _force_rename_failure(monkeypatch)
     result = tools.execute_tool(
-        "update_note", {"index": 0, "note": "will not persist"}
+        "update_note", {"name": "test-a", "note": "will not persist"}
     )
     assert "Error" in result, result
 
 
 def test_tool_delete_note_surfaces_persistence_failure(tmp_path, monkeypatch):
     store = tools.get_notes_store()
-    store.add("a")
+    store.add("a", name="test-a")
     _force_rename_failure(monkeypatch)
-    result = tools.execute_tool("delete_note", {"index": 0})
+    result = tools.execute_tool("delete_note", {"name": "test-a"})
     assert "Error" in result, result
