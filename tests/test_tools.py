@@ -396,6 +396,56 @@ def test_atomic_write_does_not_follow_symlinked_parent(tmp_path):
     assert not (outside / "created.txt").exists()
 
 
+def test_read_rejects_directory_replaced_with_symlink_after_validation(tmp_path):
+    """Simulate a TOCTOU race: validate a real path, then swap a directory
+    component with a symlink before the descriptor-based open.  The O_NOFOLLOW
+    traversal in _open_file_for_read must reject the symlinked component."""
+    tools.set_workspace_root(tmp_path)
+    subdir = tmp_path / "sub"
+    subdir.mkdir()
+    target = subdir / "file.txt"
+    target.write_text("original")
+
+    # Step 1: validate the path while everything is real directories
+    validated = tools._workspace_path("sub/file.txt")
+
+    # Step 2: replace the directory with a symlink (simulates an attacker
+    # swapping the directory between validation and open)
+    import shutil
+    outside = tmp_path.parent / "attacker"
+    outside.mkdir(exist_ok=True)
+    (outside / "file.txt").write_text("hijacked")
+    shutil.rmtree(subdir)
+    subdir.symlink_to(outside, target_is_directory=True)
+
+    # Step 3: the fd-based open must refuse to follow the symlink
+    with pytest.raises(OSError):
+        tools._open_file_for_read(validated)
+
+
+def test_write_rejects_directory_replaced_with_symlink_after_validation(tmp_path):
+    """Same TOCTOU scenario for writes: swap a parent directory with a symlink
+    after path validation, then confirm the atomic writer refuses."""
+    tools.set_workspace_root(tmp_path)
+    subdir = tmp_path / "sub"
+    subdir.mkdir()
+    target = subdir / "file.txt"
+    target.write_text("original")
+
+    validated = tools._workspace_path("sub/file.txt", read_only_allowed=False)
+
+    import shutil
+    outside = tmp_path.parent / "attacker-w"
+    outside.mkdir(exist_ok=True)
+    shutil.rmtree(subdir)
+    subdir.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(OSError):
+        tools._atomic_write_text(validated, "hijacked content")
+
+    assert not (outside / "file.txt").exists()
+
+
 def test_atomic_write_rejects_unsupported_directory_flags(tmp_path, monkeypatch):
     monkeypatch.delattr(tools.os, "O_NOFOLLOW", raising=False)
 
