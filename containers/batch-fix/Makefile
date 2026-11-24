@@ -1,6 +1,6 @@
 IMAGE := ghcr.io/benthomasson/worker-bee-batch-fix
 TAG := latest
-PLATFORMS := linux/arm64
+PLATFORMS := linux/amd64
 
 # Local paths — override for your setup
 REPO_PATH ?= $(HOME)/git/worker-bee
