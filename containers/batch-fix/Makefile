@@ -47,7 +47,7 @@ fix:
 run-local:
 	podman run -it \
 		--security-opt label=disable \
-		-v $(REPO_PATH):/home/bee/workspace/repo:ro \
+		-v $(REPO_PATH):/home/bee/workspace/repo \
 		-v $(EXPERT_PATH):/home/bee/workspace/expert \
 		-e OPENAI_API_KEY=$(OPENAI_API_KEY) \
 		-e TASK_TYPE=batch-fix \
@@ -58,7 +58,7 @@ run-local:
 fix-local:
 	podman run -it \
 		--security-opt label=disable \
-		-v $(REPO_PATH):/home/bee/workspace/repo:ro \
+		-v $(REPO_PATH):/home/bee/workspace/repo \
 		-v $(EXPERT_PATH):/home/bee/workspace/expert \
 		-e OPENAI_API_KEY=$(OPENAI_API_KEY) \
 		-e TASK_TYPE=fix-belief \
@@ -69,7 +69,7 @@ fix-local:
 verify-local:
 	podman run -it \
 		--security-opt label=disable \
-		-v $(REPO_PATH):/home/bee/workspace/repo:ro \
+		-v $(REPO_PATH):/home/bee/workspace/repo \
 		-v $(EXPERT_PATH):/home/bee/workspace/expert \
 		-e OPENAI_API_KEY=$(OPENAI_API_KEY) \
 		-e TASK_TYPE=verify \
