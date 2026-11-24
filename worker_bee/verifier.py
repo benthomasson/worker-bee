@@ -35,15 +35,15 @@ Claim: {belief_text}
    Start with the files mentioned above, then follow imports and references
    to build a complete picture.
 2. Determine whether the belief claim is supported by the actual source code.
-3. When you have enough evidence, output your verdict as a JSON block:
+3. When you have enough evidence, output your verdict as one raw JSON object
+   and nothing else (no Markdown fences or surrounding explanation):
 
-```json
 {{
   "verified": true or false,
+  "confidence": "high", "medium", or "low",
   "evidence": "the specific code or pattern that supports or contradicts the claim",
   "comment": "detailed reasoning chain: what you looked at, what you found, and why it confirms or refutes the claim"
 }}
-```
 
 Rules:
 - "verified" means the source code confirms the claim is still true today,
@@ -300,6 +300,8 @@ def verify_belief(
 
     result = _extract_verdict(session)
 
+    # A missing or malformed model response is undecided.  Do not index into
+    # the parser result or write verification state for an invalid response.
     verify = VerifyResult(
         belief_id=trace.belief_id,
         belief_text=trace.belief_text,
@@ -310,7 +312,7 @@ def verify_belief(
         verified=result.get("verified"),
         confidence=result.get("confidence", ""),
         evidence=result.get("evidence", ""),
-        comment=result.get("comment", result.get("justification", "")),
+        comment=result.get("comment", ""),
     )
 
     status = (
@@ -385,15 +387,30 @@ def _update_db(db_path: str, result: VerifyResult) -> None:
 
 
 def _parse_verify_response(response: str) -> dict:
-    """Extract verification result JSON from LLM response."""
-    decoder = json.JSONDecoder()
-    for i, ch in enumerate(response):
-        if ch != "{":
-            continue
-        try:
-            obj, _ = decoder.raw_decode(response, i)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(obj, dict) and "verified" in obj:
-            return obj
-    return {}
+    """Parse a verification response as one complete JSON object.
+
+    The response boundary is deliberately strict: model prose, Markdown
+    fences, and trailing text must not be able to smuggle an unrelated JSON
+    object into the verification result.  ``json.loads`` permits surrounding
+    JSON whitespace while rejecting any other surrounding content.
+    """
+    try:
+        obj = json.loads(response)
+    except (TypeError, json.JSONDecodeError):
+        return {}
+
+    # ``bool`` must be checked explicitly because it is a subclass of ``int``
+    # in Python; only JSON true/false are valid verdicts.  Validate every
+    # persisted field here so malformed model output cannot reach VerifyResult.
+    if not isinstance(obj, dict):
+        return {}
+    if not isinstance(obj.get("verified"), bool):
+        return {}
+    confidence = obj.get("confidence")
+    if not isinstance(confidence, str) or confidence not in {"high", "medium", "low"}:
+        return {}
+    if not isinstance(obj.get("evidence"), str):
+        return {}
+    if not isinstance(obj.get("comment"), str):
+        return {}
+    return obj

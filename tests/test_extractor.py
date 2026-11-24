@@ -87,6 +87,33 @@ def test_extract_gated(reasons_db):
     assert "node-b" in issues[0]["description"]
 
 
+def test_extract_gated_skips_verified_nodes(reasons_db):
+    conn = sqlite3.connect(str(reasons_db))
+    conn.executemany(
+        "INSERT INTO nodes (id, text, truth_value, verified_at) VALUES (?, ?, ?, ?)",
+        [
+            ("unverified", "Unverified node", "IN", ""),
+            ("null-verified", "NULL timestamp node", "IN", None),
+            ("verified", "Verified node", "IN", "2026-01-02T00:00:00+00:00"),
+            ("out", "Blocked antecedent", "OUT", ""),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO justifications (node_id, type, antecedents_json) VALUES (?, ?, ?)",
+        [
+            ("unverified", "SL", json.dumps(["out"])),
+            ("null-verified", "SL", json.dumps(["out"])),
+            ("verified", "SL", json.dumps(["out"])),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    issues = extract(reasons_db, types=["gated"])
+
+    assert [issue["belief_id"] for issue in issues] == ["unverified", "null-verified"]
+
+
 def test_extract_gated_combines_out_antecedents_across_justifications(reasons_db):
     conn = sqlite3.connect(str(reasons_db))
     conn.executemany(

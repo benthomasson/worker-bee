@@ -41,6 +41,7 @@ def _find_gated(db_path: str) -> list[dict]:
         FROM justifications j
         JOIN nodes n ON n.id = j.node_id
         WHERE n.truth_value = 'IN'
+          AND (n.verified_at IS NULL OR n.verified_at = '')
         ORDER BY j.rowid
     """).fetchall()
 

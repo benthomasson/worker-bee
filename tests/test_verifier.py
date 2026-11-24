@@ -15,22 +15,20 @@ from worker_bee.verifier import (
 )
 
 
-def test_verify_prompt_uses_comment_field():
+def test_verify_prompt_requires_raw_json_comment_field():
     assert '"comment"' in VERIFY_SYSTEM_PROMPT
     assert '"justification"' not in VERIFY_SYSTEM_PROMPT
+    assert "one raw JSON object" in VERIFY_SYSTEM_PROMPT
+    assert "```" not in VERIFY_SYSTEM_PROMPT
 
 
 def test_parse_verify_response_valid():
-    response = """<think>Let me check...</think>
-
-```json
-{
-  "verified": true,
-  "confidence": "high",
-  "evidence": "Line 13: vello = { default-features = false }",
-  "comment": "The Cargo.toml confirms default-features = false."
-}
-```"""
+    response = json.dumps({
+        "verified": True,
+        "confidence": "high",
+        "evidence": "Line 13: vello = { default-features = false }",
+        "comment": "The Cargo.toml confirms default-features = false.",
+    })
     result = _parse_verify_response(response)
     assert result["verified"] is True
     assert result["confidence"] == "high"
@@ -42,15 +40,144 @@ def test_parse_verify_response_not_verified():
     assert result["verified"] is False
 
 
+def test_parse_verify_response_allows_json_whitespace():
+    response = '\n\t {"verified": true, "confidence": "high", "evidence": "found", "comment": "confirmed"} \r\n'
+    result = _parse_verify_response(response)
+    assert result["verified"] is True
+
+
 def test_parse_verify_response_no_json():
     result = _parse_verify_response("No JSON here.")
     assert result == {}
 
 
-def test_parse_verify_response_ignores_non_verify_json():
-    response = '{"name": "foo"}\n{"verified": true, "confidence": "high", "evidence": "x", "comment": "y"}'
-    result = _parse_verify_response(response)
-    assert result["verified"] is True
+@pytest.mark.parametrize(
+    "response",
+    [
+        '<think>reasoning</think> {"verified": true}',
+        '```json\\n{"verified": true}\\n```',
+        '{"verified": true} trailing text',
+        '{"name": "foo"}\\n{"verified": true}',
+    ],
+)
+def test_parse_verify_response_rejects_surrounding_content(response):
+    assert _parse_verify_response(response) == {}
+
+
+def test_verify_belief_returns_undecided_for_invalid_response_without_writing(verify_db):
+    from worker_bee import verifier
+
+    trace = SimpleNamespace(
+        belief_id="test-belief", belief_text="some claim", source="summary.md",
+        code_refs=[], code_found=[], code_missing=[], summary_text="",
+    )
+    session = SimpleNamespace(steps=[SimpleNamespace(
+        text='{"verified": true, "confidence": [], "evidence": "bad", "comment": "bad"}'
+    )])
+    with patch.object(verifier, "trace_belief", return_value=trace), \
+         patch.object(verifier, "_guess_project_dir", return_value=None), \
+         patch.object(verifier, "_update_db") as update, \
+         patch("worker_bee.editor.run_edit_loop", return_value=session):
+        result = verifier.verify_belief(str(verify_db), "test-belief")
+
+    assert result.verified is None
+    assert result.evidence == ""
+    assert result.comment == ""
+    update.assert_not_called()
+
+    conn = sqlite3.connect(str(verify_db))
+    row = conn.execute(
+        "SELECT verified_at, metadata_json FROM nodes WHERE id = ?", ("test-belief",)
+    ).fetchone()
+    assert row == (None, None)
+    conn.close()
+
+
+def test_verify_unverified_continues_after_invalid_response(verify_db):
+    from worker_bee import verifier
+
+    def make_trace(_db_path, belief_id, **_kwargs):
+        return SimpleNamespace(
+            belief_id=belief_id, belief_text=belief_id, source="summary.md",
+            code_refs=[], code_found=[], code_missing=[], summary_text="",
+        )
+
+    sessions = [
+        SimpleNamespace(steps=[SimpleNamespace(text="not JSON")]),
+        SimpleNamespace(steps=[SimpleNamespace(
+            text='{"verified": true, "confidence": "high", '
+                 '"evidence": "found", "comment": "confirmed"}'
+        )]),
+    ]
+    with patch.object(verifier, "_find_unverified_gated",
+                      return_value=["first-belief", "second-belief"]), \
+         patch.object(verifier, "trace_belief", side_effect=make_trace), \
+         patch.object(verifier, "_guess_project_dir", return_value=None), \
+         patch.object(verifier, "_update_db") as update, \
+         patch("worker_bee.editor.run_edit_loop", side_effect=sessions) as run_loop:
+        results = verifier.verify_unverified(str(verify_db))
+
+    assert [result.belief_id for result in results] == [
+        "first-belief", "second-belief",
+    ]
+    assert results[0].verified is None
+    assert results[1].verified is True
+    assert run_loop.call_count == 2
+    update.assert_called_once()
+
+
+def test_verify_belief_sends_unwrapped_response_instruction():
+    from worker_bee import verifier
+
+    trace = SimpleNamespace(
+        belief_id="test-belief", belief_text="some claim", source="summary.md",
+        code_refs=[], code_found=[], code_missing=[], summary_text="summary",
+    )
+    session = SimpleNamespace(steps=[SimpleNamespace(
+        text='{"verified": true, "confidence": "high", "evidence": "found", "comment": "confirmed"}'
+    )])
+    with patch.object(verifier, "trace_belief", return_value=trace), \
+         patch.object(verifier, "_guess_project_dir", return_value=None), \
+         patch.object(verifier, "_update_db"), \
+         patch("worker_bee.editor.run_edit_loop", return_value=session) as run_loop:
+        verifier.verify_belief(str("reasons.db"), "test-belief")
+
+    prompt = run_loop.call_args.args[0]
+    assert "one raw JSON object" in prompt
+    assert "no Markdown fences" in prompt
+    assert "```" not in prompt
+
+
+@pytest.mark.parametrize("value", ['"true"', "1", "null", "[]", "{}"])
+def test_parse_verify_response_rejects_non_boolean_verdict(value):
+    response = f'{{"verified": {value}, "evidence": "invalid"}}'
+    assert _parse_verify_response(response) == {}
+
+
+def test_parse_verify_response_rejects_invalid_verdict_with_later_valid_object():
+    response = (
+        '{"verified": "true"}\n'
+        'The actual result is {"verified": false, "confidence": "low", '
+        '"evidence": "unsupported", "comment": "not confirmed"}'
+    )
+    assert _parse_verify_response(response) == {}
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("confidence", "[]"),
+        ("confidence", '"certain"'),
+        ("evidence", "{}"),
+        ("comment", "123"),
+    ],
+)
+def test_parse_verify_response_rejects_invalid_result_field_types(field, value):
+    response = (
+        '{"verified": true, "confidence": "high", "evidence": "found", '
+        f'"comment": "confirmed", "{field}": {value}}}'
+    )
+    assert _parse_verify_response(response) == {}
 
 
 @pytest.fixture
@@ -138,7 +265,7 @@ def test_verify_belief_retracts_negative_verdict_when_requested(verify_db):
         code_refs=[], code_found=[], code_missing=[], summary_text="",
     )
     session = SimpleNamespace(steps=[SimpleNamespace(
-        text='{"verified": false, "evidence": "not found", "justification": "no support"}'
+        text='{"verified": false, "confidence": "low", "evidence": "not found", "comment": "no support"}'
     )])
     with patch.object(verifier, "trace_belief", return_value=trace), \
          patch.object(verifier, "_guess_project_dir", return_value=None), \
@@ -195,7 +322,7 @@ def test_verify_belief_does_not_record_failed_retraction(verify_db):
         code_refs=[], code_found=[], code_missing=[], summary_text="",
     )
     session = SimpleNamespace(steps=[SimpleNamespace(
-        text='{"verified": false, "evidence": "not found", "comment": "no support"}'
+        text='{"verified": false, "confidence": "low", "evidence": "not found", "comment": "no support"}'
     )])
     with patch.object(verifier, "trace_belief", return_value=trace), \
          patch.object(verifier, "_guess_project_dir", return_value=None), \
