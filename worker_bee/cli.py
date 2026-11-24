@@ -129,6 +129,8 @@ def _main(argv: list[str] | None = None) -> int:
     sub_run.add_argument("db", help="Path to reasons.db")
     sub_run.add_argument("--model", default="ollama:qwen3.8:27b", help="Model to use (e.g. ollama:qwen3.8:27b, openai:gpt-4o, api:claude-sonnet-4-20250514)")
     sub_run.add_argument("--dry-run", action="store_true", help="Print prompts without dispatching")
+    sub_run.add_argument("--requests-per-second", type=float, default=None,
+                         help="Maximum request start rate for this model")
 
     args = parser.parse_args(argv)
 
@@ -320,7 +322,12 @@ def _main(argv: list[str] | None = None) -> int:
 
     if args.command == "run":
         from worker_bee.pipeline import run_pipeline
-        run_pipeline(args.db, model=args.model, dry_run=args.dry_run)
+        run_pipeline(
+            args.db,
+            model=args.model,
+            dry_run=args.dry_run,
+            requests_per_second=args.requests_per_second,
+        )
         return 0
 
     return 0

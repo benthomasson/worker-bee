@@ -6,7 +6,7 @@ import sys
 
 from worker_bee.extractor import extract
 from worker_bee.prompter import build_prompt
-from worker_bee.dispatcher import dispatch_batch
+from worker_bee.dispatcher import configure_rate_limit, dispatch_batch
 
 
 def run_pipeline(
@@ -15,8 +15,34 @@ def run_pipeline(
     model: str = "ollama:qwen3.8:27b",
     dry_run: bool = False,
     max_workers: int = 1,
+    requests_per_second: float | None = None,
 ) -> list[dict]:
-    """Run the first-milestone pipeline: extract → prompt → dispatch → print."""
+    """Run the first-milestone pipeline: extract → prompt → dispatch → print.
+
+    A rate supplied for this invocation is cleared when the pipeline exits, so
+    it does not unexpectedly affect later calls in the same process.
+    """
+    if requests_per_second is not None:
+        configure_rate_limit(model, requests_per_second)
+    try:
+        return _run_pipeline(
+            db_path,
+            model=model,
+            dry_run=dry_run,
+            max_workers=max_workers,
+        )
+    finally:
+        if requests_per_second is not None:
+            configure_rate_limit(model, None)
+
+
+def _run_pipeline(
+    db_path: str,
+    *,
+    model: str,
+    dry_run: bool,
+    max_workers: int,
+) -> list[dict]:
     issues = extract(db_path)
 
     if not issues:

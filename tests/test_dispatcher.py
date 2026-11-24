@@ -1,6 +1,8 @@
+import threading
+import time
 from unittest.mock import patch
 
-from worker_bee.dispatcher import Response, dispatch, dispatch_batch
+from worker_bee.dispatcher import Response, dispatch, dispatch_batch, dispatch_chat
 
 
 def test_dispatch_returns_usage():
@@ -65,3 +67,88 @@ def test_batch_rejects_non_integer_max_workers():
             assert "positive integer" in str(exc)
         else:
             raise AssertionError("expected ValueError")
+
+
+def test_dispatch_uses_configured_process_wide_rate_limiter():
+    with patch("worker_bee.dispatcher.invoke_model", return_value="ok"), patch(
+        "worker_bee.dispatcher.get_last_usage",
+        return_value={"prompt_tokens": 0, "completion_tokens": 0},
+    ), patch("worker_bee.dispatcher._acquire_rate_limit") as acquire:
+        from worker_bee.dispatcher import configure_rate_limit
+
+        configure_rate_limit("test", 10)
+        try:
+            dispatch("hello", model="test")
+        finally:
+            configure_rate_limit("test", None)
+
+    acquire.assert_called_once_with("test")
+
+
+def test_rate_limit_rejects_non_positive_values():
+    from worker_bee.dispatcher import configure_rate_limit
+
+    for value in (0, -1, True, float("inf"), float("nan"), "10"):
+        try:
+            configure_rate_limit("test", value)
+        except ValueError as exc:
+            assert "positive" in str(exc)
+        else:
+            raise AssertionError("expected ValueError")
+
+
+def test_configured_limiter_spaces_actual_dispatch_starts():
+    from worker_bee.dispatcher import configure_rate_limit
+
+    starts = []
+    configure_rate_limit("timed", 20)
+    try:
+        with patch("worker_bee.dispatcher.invoke_model", side_effect=lambda *a, **k: starts.append(time.monotonic()) or "ok"), patch(
+            "worker_bee.dispatcher.get_last_usage",
+            return_value={"prompt_tokens": 0, "completion_tokens": 0},
+        ):
+            dispatch("one", model="timed")
+            dispatch("two", model="timed")
+    finally:
+        configure_rate_limit("timed", None)
+    assert starts[1] - starts[0] >= 0.04
+
+
+def test_concurrent_dispatch_calls_share_limiter():
+    from worker_bee.dispatcher import configure_rate_limit
+
+    starts = []
+    configure_rate_limit("concurrent", 50)
+    try:
+        def invoke(*args, **kwargs):
+            starts.append(time.monotonic())
+            return "ok"
+
+        with patch("worker_bee.dispatcher.invoke_model", side_effect=invoke), patch(
+            "worker_bee.dispatcher.get_last_usage",
+            return_value={"prompt_tokens": 0, "completion_tokens": 0},
+        ):
+            threads = [threading.Thread(target=dispatch, args=(str(i),), kwargs={"model": "concurrent"}) for i in range(3)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+    finally:
+        configure_rate_limit("concurrent", None)
+    assert len(starts) == 3
+    assert min(b - a for a, b in zip(starts, starts[1:])) >= 0.015
+
+
+def test_dispatch_chat_uses_configured_limiter():
+    from worker_bee.dispatcher import configure_rate_limit
+
+    configure_rate_limit("chat-test", 10)
+    try:
+        with patch("worker_bee.dispatcher._acquire_rate_limit") as acquire, patch(
+            "worker_bee.dispatcher.create_provider"
+        ) as create:
+            dispatch_chat([], model="chat-test")
+    finally:
+        configure_rate_limit("chat-test", None)
+    acquire.assert_called_once_with("chat-test")
+    create.return_value.send.assert_called_once()

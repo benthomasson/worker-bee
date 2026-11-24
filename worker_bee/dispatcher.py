@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+import math
+import threading
+import time
 
 from worker_bee.llm import (
     invoke_model,
@@ -15,6 +18,82 @@ from worker_bee.llm import (
 
 
 DEFAULT_MODEL = "ollama:qwen3.8:27b"
+
+
+class _RequestRateLimiter:
+    """Thread-safe spacing limiter shared by calls for one model."""
+
+    def __init__(self, requests_per_second: float):
+        self.interval = 1.0 / requests_per_second
+        self._next_request = 0.0
+        self._last_request: float | None = None
+        self._enabled = True
+        self._lock = threading.Lock()
+
+    def set_rate(self, requests_per_second: float | None) -> None:
+        """Change or disable the rate without replacing the shared object."""
+        with self._lock:
+            if requests_per_second is None:
+                self._enabled = False
+                return
+            self.interval = 1.0 / requests_per_second
+            self._enabled = True
+            if self._last_request is not None:
+                self._next_request = max(
+                    self._next_request, self._last_request + self.interval
+                )
+
+    def acquire(self) -> None:
+        # Keep the lock while sleeping. Releasing it after reserving a slot
+        # permits a delayed thread to start after a later reservation, which
+        # can violate the configured spacing at the provider boundary.
+        with self._lock:
+            if not self._enabled:
+                return
+            now = time.monotonic()
+            start = max(now, self._next_request)
+            delay = start - now
+            if delay > 0:
+                time.sleep(delay)
+            self._last_request = start
+            self._next_request = start + self.interval
+
+
+_rate_limiters: dict[str, _RequestRateLimiter] = {}
+_rate_limiters_lock = threading.Lock()
+
+
+def configure_rate_limit(model: str, requests_per_second: float | None) -> None:
+    """Set or clear the process-wide request rate limit for ``model``.
+
+    The limiter is shared by ``dispatch``, ``dispatch_batch``, ``dispatch_chat``,
+    and concurrent callers in this process. It spaces request starts; it does
+    not enforce provider token quotas or coordinate separate processes.
+    """
+    if requests_per_second is not None:
+        if (
+            isinstance(requests_per_second, bool)
+            or not isinstance(requests_per_second, (int, float))
+            or not math.isfinite(requests_per_second)
+            or requests_per_second <= 0
+        ):
+            raise ValueError("requests_per_second must be a finite positive number")
+    with _rate_limiters_lock:
+        if model in _rate_limiters:
+            # Retain the object so calls that already obtained it observe the
+            # same configuration during reconfiguration and clearing.
+            _rate_limiters[model].set_rate(
+                None if requests_per_second is None else float(requests_per_second)
+            )
+        elif requests_per_second is not None:
+            _rate_limiters[model] = _RequestRateLimiter(float(requests_per_second))
+
+
+def _acquire_rate_limit(model: str) -> None:
+    with _rate_limiters_lock:
+        limiter = _rate_limiters.get(model)
+    if limiter is not None:
+        limiter.acquire()
 
 
 @dataclass
@@ -38,6 +117,7 @@ def dispatch(
     Works with any supported model string: ollama:*, claude, gemini,
     api:*, vertex:*.
     """
+    _acquire_rate_limit(model)
     reset_last_usage()
     text = invoke_model(prompt, model=model, timeout=timeout)
     usage = get_last_usage()
@@ -63,6 +143,7 @@ def dispatch_chat(
     Uses create_provider() for the full chat API with tool support.
     Returns a ChatResponse with content blocks (TextBlock, ToolUseBlock).
     """
+    _acquire_rate_limit(model)
     provider = create_provider(model)
     return provider.send(messages, system, tools or [], max_tokens=max_tokens, num_ctx=num_ctx)
 

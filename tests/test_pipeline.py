@@ -31,6 +31,7 @@ def test_run_pipeline_uses_dispatch_batch_and_preserves_order():
     assert mock_batch.call_count == 1
     _, batch_kwargs = mock_batch.call_args
     assert batch_kwargs.get("model") == "test"
+    assert batch_kwargs.get("max_workers") == 1
     assert [r["issue"]["belief_id"] for r in results] == ["b-one", "b-two", "b-three"]
     assert [r["response"].text for r in results] == [
         "answer for b-one",
@@ -70,6 +71,34 @@ def test_run_pipeline_dry_run_does_not_dispatch():
     assert [r["issue"]["belief_id"] for r in results] == ["b-one", "b-two", "b-three"]
     assert all(r["response"] is None for r in results)
     assert all(r["prompt"] == f"prompt for {r['issue']['belief_id']}" for r in results)
+
+
+def test_pipeline_clears_invocation_rate_limit():
+    with (
+        patch("worker_bee.pipeline.extract", return_value=[]),
+        patch("worker_bee.pipeline.configure_rate_limit") as configure,
+    ):
+        run_pipeline("brain.db", model="test", requests_per_second=2)
+
+    assert [call.args for call in configure.call_args_list] == [
+        ("test", 2),
+        ("test", None),
+    ]
+
+
+def test_pipeline_clears_invocation_rate_limit_on_failure():
+    with (
+        patch("worker_bee.pipeline.extract", side_effect=RuntimeError("broken")),
+        patch("worker_bee.pipeline.configure_rate_limit") as configure,
+    ):
+        try:
+            run_pipeline("brain.db", model="test", requests_per_second=2)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("expected extraction failure")
+
+    assert configure.call_args_list[-1].args == ("test", None)
 
 
 def test_dispatch_batch_defaults_to_single_worker():
