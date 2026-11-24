@@ -4,7 +4,7 @@ import sqlite3
 
 import pytest
 
-from worker_bee.tracer import _extract_code_refs, _guess_project_dir
+from worker_bee.tracer import _extract_code_refs, _guess_project_dir, _resolve_ref
 
 
 def test_extract_code_refs_file_markers():
@@ -33,6 +33,34 @@ def test_extract_code_refs_bare_paths():
     text = "See ../ia2-rust/src/lib.rs for the full implementation."
     refs = _extract_code_refs(text)
     assert "../ia2-rust/src/lib.rs" in refs
+
+
+def test_extract_code_refs_preserves_commas_in_paths():
+    text = "See docs/report,final.md and [file] `docs/report,final.md`."
+    refs = _extract_code_refs(text)
+    assert refs == ["docs/report,final.md"]
+
+
+def test_extract_code_refs_normalizes_equivalent_paths():
+    refs = _extract_code_refs(
+        "[file] src/./main.py and [file] src//main.py and [file] src/../file.py"
+    )
+    assert refs == ["src/main.py", "file.py"]
+
+
+def test_extract_code_refs_does_not_truncate_longer_extension():
+    refs = _extract_code_refs("See src/parser.cpp for the implementation.")
+    assert refs == ["src/parser.cpp"]
+
+
+def test_extract_code_refs_unquoted_markers_stop_at_whitespace():
+    refs = _extract_code_refs("[file] src/./main.py and [file] src/other.py")
+    assert refs == ["src/main.py", "src/other.py"]
+
+
+def test_extract_code_refs_rejects_extension_like_suffixes():
+    refs = _extract_code_refs("See src/main.py.bak, but use src/main.py.")
+    assert refs == ["src/main.py"]
 
 
 def test_extract_code_refs_deduplicates():
@@ -65,6 +93,58 @@ def test_guess_project_dir_no_match(tmp_path):
 
     result = _guess_project_dir(db_path)
     assert result is None
+
+
+def test_resolve_ref_prefers_project_and_returns_absolute_path(tmp_path):
+    project_dir = tmp_path / "project"
+    summary_dir = tmp_path / "summary"
+    project_dir.mkdir()
+    summary_dir.mkdir()
+    project_file = project_dir / "src" / "main.py"
+    project_file.parent.mkdir()
+    project_file.write_text("project")
+    summary_file = summary_dir / "src" / "main.py"
+    summary_file.parent.mkdir()
+    summary_file.write_text("summary")
+
+    result = _resolve_ref("src/./main.py", project_dir, summary_dir)
+
+    assert result == project_file.resolve()
+    assert result.is_absolute()
+
+
+def test_resolve_ref_allows_traversal_and_canonicalizes_result(tmp_path):
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    outside = tmp_path / "outside.py"
+    outside.write_text("outside")
+
+    result = _resolve_ref("../outside.py", project_dir, tmp_path / "summary")
+
+    assert result == outside.resolve()
+
+
+def test_resolve_ref_accepts_absolute_reference(tmp_path):
+    referenced = tmp_path / "absolute.py"
+    referenced.write_text("absolute")
+
+    result = _resolve_ref(str(referenced), None, tmp_path / "summary")
+
+    assert result == referenced.resolve()
+
+
+def test_resolve_ref_returns_symlink_target(tmp_path):
+    target = tmp_path / "target.py"
+    target.write_text("target")
+    link = tmp_path / "link.py"
+    try:
+        link.symlink_to(target)
+    except (NotImplementedError, OSError):
+        pytest.skip("symlinks are not supported")
+
+    result = _resolve_ref("link.py", None, tmp_path)
+
+    assert result == target.resolve()
 
 
 @pytest.fixture
@@ -108,6 +188,23 @@ def test_trace_finds_code_refs(trace_db):
     assert "Cargo.toml" in result.code_found
     assert result.code_sections != ""
     assert "default-features = false" in result.code_sections
+
+
+def test_trace_resolves_relative_normalized_code_refs(trace_db):
+    summary = trace_db.parent / "summaries" / "topic-rendering.md"
+    summary.write_text("[file] src/./main.py")
+    project_dir = trace_db.parent.parent / "test"
+    source = project_dir / "src" / "main.py"
+    source.parent.mkdir()
+    source.write_text("print('ok')")
+
+    from worker_bee.tracer import trace_belief
+
+    result = trace_belief(trace_db, "test-belief", project_dir=project_dir)
+
+    assert result.code_refs == ["src/main.py"]
+    assert result.code_found == ["src/main.py"]
+    assert "print('ok')" in result.code_sections
 
 
 def test_trace_missing_belief(trace_db):

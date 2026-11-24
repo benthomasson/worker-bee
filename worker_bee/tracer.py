@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import posixpath
 import re
 import sqlite3
 import sys
@@ -119,24 +120,36 @@ def _extract_code_refs(text: str) -> list[str]:
     seen: set[str] = set()
 
     def _add(path: str) -> None:
+        # Keep commas inside filenames and normalize equivalent spellings.
         path = path.strip().rstrip(",:;)")
+        if not path:
+            return
+        path = posixpath.normpath(path)
         if path and path not in seen:
             seen.add(path)
             refs.append(path)
 
-    for m in re.finditer(r'\[file\]\s*`?([^`\n]+)`?', text):
+    # Quoted markers may contain spaces; unquoted markers stop at the next
+    # whitespace so adjacent [file] markers do not consume the rest of a line.
+    for m in re.finditer(r'\[file\]\s*`([^`\n]+)`', text):
+        _add(m.group(1))
+    for m in re.finditer(r'\[file\]\s*([^\s`]+)', text):
         _add(m.group(1))
 
     for m in re.finditer(r'[Ff]rom\s+`([^`]+\.\w+)`', text):
         _add(m.group(1))
 
-    extensions = r'\.(?:rs|py|toml|js|ts|jsx|tsx|json|yaml|yml|md|go|c|h|cpp|hpp|java|rb|sh)'
+    # Require a delimiter after the extension so `.c` cannot match the
+    # prefix of a `.cpp` filename or `foo.py.bak`.
+    extensions = r'\.(?:rs|py|toml|js|ts|jsx|tsx|json|yaml|yml|md|go|c|h|cpp|hpp|java|rb|sh)(?![\w]|\.[A-Za-z0-9_])'
     for m in re.finditer(rf'`([^`\s]+{extensions})`', text):
         candidate = m.group(1)
         if '(' not in candidate and len(candidate) < 200:
             _add(candidate)
 
-    for m in re.finditer(rf'(?:^|\s)((?:\.\./)?(?:[\w.-]+/)*[\w.-]+{extensions})', text, re.MULTILINE):
+    # Commas are valid filename characters; only trailing punctuation is
+    # removed by _add(), so an internal comma remains part of the reference.
+    for m in re.finditer(rf'(?:^|\s)((?:\.\./)?(?:[\w.,-]+/)*[\w.,-]+{extensions})', text, re.MULTILINE):
         candidate = m.group(1)
         if len(candidate) < 200 and '(' not in candidate:
             _add(candidate)
@@ -212,15 +225,15 @@ def _resolve_ref(ref: str, project_dir: Path | None, summary_dir: Path) -> Path 
     p = Path(ref)
 
     if p.is_absolute() and p.exists():
-        return p
+        return p.resolve()
 
     if project_dir:
         candidate = project_dir / ref
         if candidate.exists():
-            return candidate
+            return candidate.resolve()
         candidate = project_dir / ref.lstrip("./")
         if candidate.exists():
-            return candidate
+            return candidate.resolve()
         if "/" not in ref:
             matches = [
                 m for m in project_dir.rglob(ref)
@@ -228,11 +241,11 @@ def _resolve_ref(ref: str, project_dir: Path | None, summary_dir: Path) -> Path 
                            for p in m.relative_to(project_dir).parents)
             ]
             if len(matches) == 1:
-                return matches[0]
+                return matches[0].resolve()
 
     candidate = summary_dir / ref
     if candidate.exists():
-        return candidate
+        return candidate.resolve()
 
     return None
 
