@@ -67,15 +67,18 @@ fi
 
 # ─── Clone repos ───
 
-clone_repo() {
+clone_or_detect_repo() {
     local url="$1"
     local dest="$2"
     local name="$3"
 
     if [ -d "$dest/.git" ]; then
-        step "Pulling latest $name"
-        cd "$dest" && git pull --ff-only
+        step "Using mounted $name at $dest"
         return
+    fi
+
+    if [ -z "$url" ]; then
+        fail "$name not mounted and no URL provided"
     fi
 
     step "Cloning $name"
@@ -88,13 +91,8 @@ clone_repo() {
 
 log "Setup"
 
-if [ -n "$REPO_URL" ]; then
-    clone_repo "$REPO_URL" "$REPO_DIR" "target repo"
-fi
-
-if [ -n "$EXPERT_URL" ]; then
-    clone_repo "$EXPERT_URL" "$EXPERT_DIR" "expert knowledge base"
-fi
+clone_or_detect_repo "${REPO_URL:-}" "$REPO_DIR" "target repo"
+clone_or_detect_repo "${EXPERT_URL:-}" "$EXPERT_DIR" "expert knowledge base"
 
 if [ ! -f "$DB_PATH" ]; then
     fail "No reasons.db found at $DB_PATH"
