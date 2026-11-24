@@ -62,6 +62,47 @@ def test_openai_tool_invocation_normalizes_errors_and_passes_timeout(monkeypatch
         provider.send([], "", [], timeout=23)
 
 
+def test_openai_malformed_response_records_failed_call(monkeypatch):
+    class FakeResponses:
+        def create(self, **kwargs):
+            return SimpleNamespace(output=None)
+
+    monkeypatch.setattr(llm, "_HAS_OPENAI", True)
+    monkeypatch.setattr(llm._openai_mod, "OpenAI", lambda: SimpleNamespace(responses=FakeResponses()))
+    llm.reset_cost_tracker()
+
+    with pytest.raises(TypeError):
+        llm._invoke_openai("hello", "openai:test")
+    assert llm.get_cost_summary()["usage_unknown_calls"] == 1
+
+
+def test_api_value_error_is_normalized(monkeypatch):
+    class FakeLLM:
+        def invoke(self, prompt, config=None):
+            raise ValueError("bad provider response")
+
+    monkeypatch.setattr(llm, "_HAS_LANGCHAIN_ANTHROPIC", True)
+    monkeypatch.setattr(llm, "ChatAnthropic", lambda **kwargs: FakeLLM())
+    llm.reset_cost_tracker()
+
+    with pytest.raises(RuntimeError, match="api:test failed: bad provider response"):
+        llm._invoke_api("hello", "api:test")
+    assert llm.get_cost_summary()["calls"] == 1
+
+
+def test_api_constructor_failure_records_failed_call(monkeypatch):
+    def fail_constructor(**kwargs):
+        raise RuntimeError("bad configuration")
+
+    monkeypatch.setattr(llm, "_HAS_LANGCHAIN_ANTHROPIC", True)
+    monkeypatch.setattr(llm, "ChatAnthropic", fail_constructor)
+    llm.reset_cost_tracker()
+
+    with pytest.raises(RuntimeError, match="bad configuration"):
+        llm._invoke_api("hello", "api:test")
+    assert llm.get_cost_summary()["usage_unknown_calls"] == 1
+
+
 def test_anthropic_provider_records_unknown_usage():
     llm.reset_cost_tracker()
 
@@ -142,6 +183,23 @@ def test_ollama_provider_normalizes_wrapped_socket_timeout(monkeypatch):
     with pytest.raises(subprocess.TimeoutExpired) as error:
         provider.send([], "system", [], timeout=29)
     assert error.value.timeout == 29
+
+
+def test_cli_nonzero_exit_records_failed_call(monkeypatch):
+    llm.reset_cost_tracker()
+    monkeypatch.setattr(llm.shutil, "which", lambda binary: "/usr/bin/" + binary)
+    monkeypatch.setattr(
+        llm.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=1, stderr="provider failed"),
+    )
+
+    with pytest.raises(RuntimeError, match="claude failed"):
+        llm.invoke_model("hello", "claude")
+    summary = llm.get_cost_summary()
+    assert summary["calls"] == 1
+    assert summary["usage_unknown_calls"] == 1
+    assert summary["by_model"]["claude"]["usage_unknown_calls"] == 1
 
 
 def test_cli_parse_failure_records_call_without_known_usage():

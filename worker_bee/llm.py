@@ -161,6 +161,11 @@ def _record_cost(
         m["total_cost_usd"] += cost_usd
 
 
+def _record_failed_call(model: str) -> None:
+    """Account for an attempted call whose provider supplied no usage."""
+    _record_cost(model, 0, 0, 0.0, usage_known=False)
+
+
 def _parse_cli_json(output: str, model: str) -> str:
     """Parse JSON output from CLI, extract response text and record costs.
 
@@ -288,59 +293,67 @@ def _invoke_api(prompt: str, model: str, timeout: int = 300) -> str:
     """Invoke an LLM via LangChain API adapter. Returns response text."""
     prefix, name = model.split(":", 1)
 
-    if prefix == "api":
-        if not _HAS_LANGCHAIN_ANTHROPIC:
-            raise ImportError(
-                "langchain-anthropic is required for api: models. "
-                "Install with: pip install langchain-anthropic"
-            )
-        llm = ChatAnthropic(model=name, timeout=float(timeout))
-    elif prefix == "vertex":
-        if not _HAS_LANGCHAIN_VERTEX:
-            raise ImportError(
-                "langchain-google-vertexai is required for vertex: models. "
-                "Install with: pip install langchain-google-vertexai"
-            )
-        project = os.environ.get("GOOGLE_CLOUD_PROJECT")
-        if not project:
-            raise RuntimeError(
-                "GOOGLE_CLOUD_PROJECT environment variable is required "
-                "for vertex: models"
-            )
-        location = os.environ.get("GOOGLE_CLOUD_REGION", "us-east5")
-        llm = ChatAnthropicVertex(
-            model_name=name, project=project, location=location,
-            request_timeout=float(timeout),
-        )
-    else:
-        raise ValueError(f"Unknown API prefix: {prefix}")
-
-    config = {}
-    handler = _get_langfuse_handler()
-    if handler:
-        config["callbacks"] = [handler]
-
+    accounted = False
     try:
-        response = llm.invoke(prompt, config=config)
-    except Exception as exc:
-        _normalize_provider_exception(exc, model, timeout)
+        if prefix == "api":
+            if not _HAS_LANGCHAIN_ANTHROPIC:
+                raise ImportError(
+                    "langchain-anthropic is required for api: models. "
+                    "Install with: pip install langchain-anthropic"
+                )
+            llm = ChatAnthropic(model=name, timeout=float(timeout))
+        elif prefix == "vertex":
+            if not _HAS_LANGCHAIN_VERTEX:
+                raise ImportError(
+                    "langchain-google-vertexai is required for vertex: models. "
+                    "Install with: pip install langchain-google-vertexai"
+                )
+            project = os.environ.get("GOOGLE_CLOUD_PROJECT")
+            if not project:
+                raise RuntimeError(
+                    "GOOGLE_CLOUD_PROJECT environment variable is required "
+                    "for vertex: models"
+                )
+            location = os.environ.get("GOOGLE_CLOUD_REGION", "us-east5")
+            llm = ChatAnthropicVertex(
+                model_name=name, project=project, location=location,
+                request_timeout=float(timeout),
+            )
+        else:
+            raise ValueError(f"Unknown API prefix: {prefix}")
 
-    response_metadata = getattr(response, "response_metadata", None) or {}
-    usage = getattr(response, "usage_metadata", None) or response_metadata.get("usage", {})
-    if isinstance(usage, dict):
-        input_tokens = usage.get("input_tokens", usage.get("prompt_tokens"))
-        output_tokens = usage.get("output_tokens", usage.get("completion_tokens"))
-    else:
-        input_tokens = output_tokens = None
-    usage_known = _valid_token_count(input_tokens) and _valid_token_count(output_tokens)
-    _record_cost(
-        model,
-        input_tokens if usage_known else 0,
-        output_tokens if usage_known else 0,
-        0.0,
-        usage_known=usage_known,
-    )
-    return response.content
+        config = {}
+        handler = _get_langfuse_handler()
+        if handler:
+            config["callbacks"] = [handler]
+        response = llm.invoke(prompt, config=config)
+
+        response_metadata = getattr(response, "response_metadata", None) or {}
+        usage = getattr(response, "usage_metadata", None) or response_metadata.get("usage", {})
+        if isinstance(usage, dict):
+            input_tokens = usage.get("input_tokens", usage.get("prompt_tokens"))
+            output_tokens = usage.get("output_tokens", usage.get("completion_tokens"))
+        else:
+            input_tokens = output_tokens = None
+        content = response.content
+        usage_known = _valid_token_count(input_tokens) and _valid_token_count(output_tokens)
+        _record_cost(
+            model,
+            input_tokens if usage_known else 0,
+            output_tokens if usage_known else 0,
+            0.0,
+            usage_known=usage_known,
+        )
+        accounted = True
+        return content
+    except Exception as exc:
+        if not accounted:
+            _record_failed_call(model)
+        # Keep dependency failures actionable, but normalize every provider
+        # failure (including SDK ValueError/RuntimeError) to the public API.
+        if isinstance(exc, ImportError):
+            raise
+        _normalize_provider_exception(exc, model, timeout)
 
 
 def reset_last_usage() -> None:
@@ -376,19 +389,25 @@ def invoke_model(prompt: str, model: str = "claude", timeout: int = 300) -> str:
     cmd = resolve_model_cmd(model)
     binary = cmd[0]
     if not shutil.which(binary):
+        _record_failed_call(model)
         raise FileNotFoundError(f"'{binary}' CLI not found in PATH")
 
     env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
 
-    result = subprocess.run(
-        cmd,
-        input=prompt,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        env=env,
-    )
+    try:
+        result = subprocess.run(
+            cmd,
+            input=prompt,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+        )
+    except Exception:
+        _record_failed_call(model)
+        raise
     if result.returncode != 0:
+        _record_failed_call(model)
         raise RuntimeError(f"{model} failed: {result.stderr}")
     output = result.stdout
     return _parse_cli_json(output, model)
@@ -397,6 +416,7 @@ def invoke_model(prompt: str, model: str = "claude", timeout: int = 300) -> str:
 def _invoke_openai(prompt: str, model: str, timeout: int = 300) -> str:
     """Invoke an OpenAI model via the Responses API."""
     if not _HAS_OPENAI:
+        _record_failed_call(model)
         raise ImportError(
             "openai is required for openai: models. "
             "Install with: pip install openai"
@@ -410,25 +430,30 @@ def _invoke_openai(prompt: str, model: str, timeout: int = 300) -> str:
             timeout=timeout,
         )
     except Exception as exc:
+        _record_failed_call(model)
         _normalize_provider_exception(exc, model, timeout)
-    text = ""
-    for item in response.output:
-        if item.type == "message":
-            for part in item.content:
-                if hasattr(part, "text"):
-                    text += part.text
-    usage = getattr(response, "usage", None)
-    input_tokens = getattr(usage, "input_tokens", None) if usage else None
-    output_tokens = getattr(usage, "output_tokens", None) if usage else None
-    usage_known = _valid_token_count(input_tokens) and _valid_token_count(output_tokens)
-    _record_cost(
-        model,
-        input_tokens if usage_known else 0,
-        output_tokens if usage_known else 0,
-        0.0,
-        usage_known=usage_known,
-    )
-    return text
+    try:
+        text = ""
+        for item in response.output:
+            if item.type == "message":
+                for part in item.content:
+                    if hasattr(part, "text"):
+                        text += part.text
+        usage = getattr(response, "usage", None)
+        input_tokens = getattr(usage, "input_tokens", None) if usage else None
+        output_tokens = getattr(usage, "output_tokens", None) if usage else None
+        usage_known = _valid_token_count(input_tokens) and _valid_token_count(output_tokens)
+        _record_cost(
+            model,
+            input_tokens if usage_known else 0,
+            output_tokens if usage_known else 0,
+            0.0,
+            usage_known=usage_known,
+        )
+        return text
+    except Exception:
+        _record_failed_call(model)
+        raise
 
 
 def _invoke_ollama(prompt: str, model: str, timeout: int = 300) -> str:
@@ -436,54 +461,68 @@ def _invoke_ollama(prompt: str, model: str, timeout: int = 300) -> str:
     ollama_model = model.split(":", 1)[1]
     base_url = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 
-    payload = {
-        "model": ollama_model,
-        "prompt": prompt,
-        "stream": False,
-    }
-
-    data = json.dumps(payload).encode()
-    req = urllib.request.Request(
-        f"{base_url}/api/generate",
-        data=data,
-        headers={"Content-Type": "application/json"},
-    )
+    try:
+        payload = {
+            "model": ollama_model,
+            "prompt": prompt,
+            "stream": False,
+        }
+        data = json.dumps(payload).encode()
+        req = urllib.request.Request(
+            f"{base_url}/api/generate",
+            data=data,
+            headers={"Content-Type": "application/json"},
+        )
+    except Exception:
+        _record_failed_call(model)
+        raise
 
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             result = json.loads(resp.read())
     except urllib.error.HTTPError as e:
+        _record_failed_call(model)
         body = e.read().decode(errors="replace")
         raise RuntimeError(f"Ollama error: {body}") from e
     except urllib.error.URLError as e:
+        _record_failed_call(model)
         if isinstance(e.reason, (socket.timeout, TimeoutError)):
             _normalize_provider_exception(e.reason, model, timeout)
         raise RuntimeError(
             f"Cannot connect to Ollama at {base_url} — is it running? ({e})"
         ) from e
+    except Exception:
+        _record_failed_call(model)
+        raise
 
-    output = result.get("response", "")
+    try:
+        output = result.get("response", "")
+        prompt_tokens = result.get("prompt_eval_count")
+        completion_tokens = result.get("eval_count")
+    except Exception:
+        _record_failed_call(model)
+        raise
 
-    prompt_tokens = result.get("prompt_eval_count")
-    completion_tokens = result.get("eval_count")
-    usage_known = (
-        _valid_token_count(prompt_tokens)
-        and _valid_token_count(completion_tokens)
-    )
-    _record_cost(
-        model,
-        prompt_tokens if usage_known else 0,
-        completion_tokens if usage_known else 0,
-        0.0,
-        usage_known=usage_known,
-    )
-
-    if "Thinking...\n" in output:
-        parts = output.split("...done thinking.\n", 1)
-        if len(parts) == 2:
-            output = parts[1]
-
-    return output
+    try:
+        if "Thinking...\n" in output:
+            parts = output.split("...done thinking.\n", 1)
+            if len(parts) == 2:
+                output = parts[1]
+        usage_known = (
+            _valid_token_count(prompt_tokens)
+            and _valid_token_count(completion_tokens)
+        )
+        _record_cost(
+            model,
+            prompt_tokens if usage_known else 0,
+            completion_tokens if usage_known else 0,
+            0.0,
+            usage_known=usage_known,
+        )
+        return output
+    except Exception:
+        _record_failed_call(model)
+        raise
 
 
 # --- Tool-use chat providers ---
@@ -563,20 +602,25 @@ class _AnthropicProvider:
                 timeout=timeout,
             )
         except Exception as exc:
+            _record_failed_call(self.model)
             _normalize_provider_exception(exc, self.model, timeout)
 
-        usage = getattr(response, "usage", None)
-        input_tokens = getattr(usage, "input_tokens", None) if usage is not None else None
-        output_tokens = getattr(usage, "output_tokens", None) if usage is not None else None
-        usage_known = _valid_token_count(input_tokens) and _valid_token_count(output_tokens)
-        _record_cost(
-            self.model,
-            input_tokens if usage_known else 0,
-            output_tokens if usage_known else 0,
-            0.0,
-            usage_known=usage_known,
-        )
-        return response
+        try:
+            usage = getattr(response, "usage", None)
+            input_tokens = getattr(usage, "input_tokens", None) if usage is not None else None
+            output_tokens = getattr(usage, "output_tokens", None) if usage is not None else None
+            usage_known = _valid_token_count(input_tokens) and _valid_token_count(output_tokens)
+            _record_cost(
+                self.model,
+                input_tokens if usage_known else 0,
+                output_tokens if usage_known else 0,
+                0.0,
+                usage_known=usage_known,
+            )
+            return response
+        except Exception:
+            _record_failed_call(self.model)
+            raise
 
 
 class _OllamaProvider:
@@ -603,8 +647,12 @@ class _OllamaProvider:
         self._tool_id_counter = 0
 
     def send(self, messages, system, tools, max_tokens=8096, num_ctx=None, timeout=300):
-        ollama_messages = self._convert_messages(messages, system)
-        ollama_tools = self._convert_tools(tools)
+        try:
+            ollama_messages = self._convert_messages(messages, system)
+            ollama_tools = self._convert_tools(tools)
+        except Exception:
+            _record_failed_call(f"ollama:{self.model}")
+            raise
 
         options = {"num_predict": max_tokens}
         if num_ctx:
@@ -619,19 +667,25 @@ class _OllamaProvider:
         if ollama_tools:
             payload["tools"] = ollama_tools
 
-        data = json.dumps(payload).encode()
-        req = urllib.request.Request(
-            f"{self.base_url}/api/chat",
-            data=data,
-            headers={"Content-Type": "application/json"},
-        )
+        try:
+            data = json.dumps(payload).encode()
+            req = urllib.request.Request(
+                f"{self.base_url}/api/chat",
+                data=data,
+                headers={"Content-Type": "application/json"},
+            )
+        except Exception:
+            _record_failed_call(f"ollama:{self.model}")
+            raise
 
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 result = json.loads(resp.read())
         except TimeoutError as exc:
+            _record_failed_call(f"ollama:{self.model}")
             _normalize_provider_exception(exc, f"ollama:{self.model}", timeout)
         except urllib.error.HTTPError as e:
+            _record_failed_call(f"ollama:{self.model}")
             body = e.read().decode(errors="replace")
             try:
                 detail = json.loads(body).get("error", body)
@@ -639,26 +693,35 @@ class _OllamaProvider:
                 detail = body
             raise RuntimeError(f"Ollama error: {detail}") from e
         except urllib.error.URLError as e:
+            _record_failed_call(f"ollama:{self.model}")
             if isinstance(e.reason, (socket.timeout, TimeoutError)):
                 _normalize_provider_exception(e.reason, f"ollama:{self.model}", timeout)
             raise RuntimeError(
                 f"Cannot connect to Ollama at {self.base_url} — is it running? ({e})"
             ) from e
+        except Exception:
+            _record_failed_call(f"ollama:{self.model}")
+            raise
 
-        prompt_tokens = result.get("prompt_eval_count")
-        completion_tokens = result.get("eval_count")
-        usage_known = (
-            _valid_token_count(prompt_tokens)
-            and _valid_token_count(completion_tokens)
-        )
-        _record_cost(
-            f"ollama:{self.model}",
-            prompt_tokens if usage_known else 0,
-            completion_tokens if usage_known else 0,
-            0.0,
-            usage_known=usage_known,
-        )
-        return self._parse_response(result)
+        try:
+            parsed = self._parse_response(result)
+            prompt_tokens = result.get("prompt_eval_count")
+            completion_tokens = result.get("eval_count")
+            usage_known = (
+                _valid_token_count(prompt_tokens)
+                and _valid_token_count(completion_tokens)
+            )
+            _record_cost(
+                f"ollama:{self.model}",
+                prompt_tokens if usage_known else 0,
+                completion_tokens if usage_known else 0,
+                0.0,
+                usage_known=usage_known,
+            )
+            return parsed
+        except Exception:
+            _record_failed_call(f"ollama:{self.model}")
+            raise
 
     def _convert_messages(self, messages, system):
         """Convert Anthropic-format message history to Ollama/OpenAI format."""
@@ -783,8 +846,12 @@ class _OpenAIProvider:
         self.client = _openai_mod.OpenAI()
 
     def send(self, messages, system, tools, max_tokens=8096, num_ctx=None, timeout=300):
-        input_items = self._convert_messages(messages)
-        openai_tools = self._convert_tools(tools) if tools else None
+        try:
+            input_items = self._convert_messages(messages)
+            openai_tools = self._convert_tools(tools) if tools else None
+        except Exception:
+            _record_failed_call(f"openai:{self.model}")
+            raise
 
         kwargs = {
             "model": self.model,
@@ -799,21 +866,26 @@ class _OpenAIProvider:
         try:
             response = self.client.responses.create(**kwargs)
         except Exception as exc:
+            _record_failed_call(f"openai:{self.model}")
             _normalize_provider_exception(exc, f"openai:{self.model}", timeout)
 
-        usage = getattr(response, "usage", None)
-        input_tokens = getattr(usage, "input_tokens", None) if usage is not None else None
-        output_tokens = getattr(usage, "output_tokens", None) if usage is not None else None
-        usage_known = _valid_token_count(input_tokens) and _valid_token_count(output_tokens)
-        _record_cost(
-            f"openai:{self.model}",
-            input_tokens if usage_known else 0,
-            output_tokens if usage_known else 0,
-            0.0,
-            usage_known=usage_known,
-        )
-
-        return self._parse_response(response)
+        try:
+            parsed = self._parse_response(response)
+            usage = getattr(response, "usage", None)
+            input_tokens = getattr(usage, "input_tokens", None) if usage is not None else None
+            output_tokens = getattr(usage, "output_tokens", None) if usage is not None else None
+            usage_known = _valid_token_count(input_tokens) and _valid_token_count(output_tokens)
+            _record_cost(
+                f"openai:{self.model}",
+                input_tokens if usage_known else 0,
+                output_tokens if usage_known else 0,
+                0.0,
+                usage_known=usage_known,
+            )
+            return parsed
+        except Exception:
+            _record_failed_call(f"openai:{self.model}")
+            raise
 
     def _convert_messages(self, messages):
         """Convert Anthropic-format message history to Responses API input items."""

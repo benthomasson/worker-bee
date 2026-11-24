@@ -3,6 +3,7 @@ import time
 from unittest.mock import patch
 
 from worker_bee.dispatcher import Response, dispatch, dispatch_batch, dispatch_chat
+import worker_bee.llm as llm
 
 
 def test_dispatch_returns_usage():
@@ -38,6 +39,21 @@ def test_batch_is_parallel_ordered_and_isolates_retries():
     assert result[2][1].text == "three"
     assert result[1][1].error == "RuntimeError: nope"
     assert calls["bad"] == 3
+
+
+def test_batch_failed_retries_are_accounted():
+    llm.reset_cost_tracker()
+    with patch("worker_bee.llm.shutil.which", return_value="/usr/bin/claude"), patch(
+        "worker_bee.llm.subprocess.run",
+        side_effect=RuntimeError("nope"),
+    ):
+        result = dispatch_batch([({"id": 1}, "bad")], model="claude", retries=2)
+
+    assert result[0][1].error == "RuntimeError: nope"
+    summary = llm.get_cost_summary()
+    assert summary["calls"] == 3
+    assert summary["usage_unknown_calls"] == 3
+    assert summary["by_model"]["claude"]["calls"] == 3
 
 
 def test_batch_rejects_negative_retries():
