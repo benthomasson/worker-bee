@@ -1,3 +1,4 @@
+import sys
 from pathlib import Path
 
 import pytest
@@ -204,6 +205,24 @@ def test_run_command_rejects_paths_outside_workspace(tmp_path):
     tools.set_workspace_root(tmp_path)
     result = tools.execute_tool("run_command", {"command": "cat ../secret.txt"})
     assert "outside workspace" in result
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="child Landlock is Linux-only")
+def test_run_command_child_is_confined_to_workspace(tmp_path):
+    tools.set_workspace_root(tmp_path)
+    outside = tmp_path.parent / "child-escape.txt"
+    (tmp_path / "child_escape_test.py").write_text(
+        "from pathlib import Path\n"
+        "def test_escape():\n"
+        "    (Path(__file__).parent / 'inside.txt').write_text('ok')\n"
+        "    (Path(__file__).parent.parent / 'child-escape.txt').write_text('nope')\n"
+    )
+    result = tools.execute_tool(
+        "run_command", {"command": "pytest -q child_escape_test.py"}
+    )
+    assert "1 failed" in result
+    assert (tmp_path / "inside.txt").read_text() == "ok"
+    assert not outside.exists()
 
 
 def test_powerful_allowlisted_commands_are_restricted(tmp_path):

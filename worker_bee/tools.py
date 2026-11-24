@@ -13,6 +13,7 @@ import os
 import re
 import secrets
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -752,6 +753,128 @@ _ALLOWED_COMMANDS = frozenset({
 })
 
 
+# Linux Landlock is applied in the child process, rather than merely checking
+# command-line paths in the parent.  This matters for programs such as Python,
+# pytest, and git hooks, which can open arbitrary paths after they start.
+_LANDLOCK_ACCESS_FS_EXECUTE = 1 << 0
+_LANDLOCK_ACCESS_FS_WRITE_FILE = 1 << 1
+_LANDLOCK_ACCESS_FS_READ_FILE = 1 << 2
+_LANDLOCK_ACCESS_FS_READ_DIR = 1 << 3
+_LANDLOCK_ACCESS_FS_REMOVE_DIR = 1 << 4
+_LANDLOCK_ACCESS_FS_REMOVE_FILE = 1 << 5
+_LANDLOCK_ACCESS_FS_MAKE_CHAR = 1 << 6
+_LANDLOCK_ACCESS_FS_MAKE_DIR = 1 << 7
+_LANDLOCK_ACCESS_FS_MAKE_REG = 1 << 8
+_LANDLOCK_ACCESS_FS_MAKE_SOCK = 1 << 9
+_LANDLOCK_ACCESS_FS_MAKE_FIFO = 1 << 10
+_LANDLOCK_ACCESS_FS_MAKE_BLOCK = 1 << 11
+_LANDLOCK_ACCESS_FS_MAKE_SYM = 1 << 12
+_LANDLOCK_ACCESS_FS_REFER = 1 << 13
+_LANDLOCK_ACCESS_FS_TRUNCATE = 1 << 14
+_LANDLOCK_RULE_TYPE_PATH_BENEATH = 1
+
+
+def _landlock_preexec(root: Path, read_paths: tuple[Path, ...] = ()) -> None:
+    """Confine a subprocess to *root* on Linux kernels supporting Landlock.
+
+    This runs after fork and before exec, so the restriction is inherited by
+    the approved executable and anything it launches.  Failure is deliberate:
+    silently running an unsandboxed child would make the command allowlist look
+    like a filesystem boundary when it is not one.
+    """
+    if sys.platform != "linux":
+        raise OSError("Landlock is unavailable on this platform")
+    import ctypes
+
+    # These numbers are stable on the architectures supported by Landlock, but
+    # are not part of the Python API.  Refuse unknown architectures rather than
+    # accidentally invoking an unrelated syscall.
+    syscall_numbers = {
+        "x86_64": (444, 445, 446),
+        "aarch64": (444, 445, 446),
+        "arm64": (444, 445, 446),
+        "riscv64": (444, 445, 446),
+        "ppc64le": (444, 445, 446),
+        "s390x": (444, 445, 446),
+    }
+    try:
+        create_ruleset, add_rule, restrict_self = syscall_numbers[os.uname().machine]
+    except KeyError as exc:
+        raise OSError("Landlock is unavailable on this architecture") from exc
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.syscall.restype = ctypes.c_long
+    pr_set_no_new_privs = 38
+    # Probe the ABI before constructing the ruleset.  REFER and TRUNCATE were
+    # added in ABI 2 and 3 respectively; including unavailable rights makes
+    # older, otherwise usable kernels reject the ruleset with EINVAL.
+    landlock_create_ruleset_version = 1
+    abi = libc.syscall(create_ruleset, None, 0, landlock_create_ruleset_version)
+    if abi < 1:
+        raise OSError(ctypes.get_errno(), "Landlock is unavailable")
+    all_access = (
+        _LANDLOCK_ACCESS_FS_EXECUTE | _LANDLOCK_ACCESS_FS_WRITE_FILE |
+        _LANDLOCK_ACCESS_FS_READ_FILE | _LANDLOCK_ACCESS_FS_READ_DIR |
+        _LANDLOCK_ACCESS_FS_REMOVE_DIR | _LANDLOCK_ACCESS_FS_REMOVE_FILE |
+        _LANDLOCK_ACCESS_FS_MAKE_CHAR | _LANDLOCK_ACCESS_FS_MAKE_DIR |
+        _LANDLOCK_ACCESS_FS_MAKE_REG | _LANDLOCK_ACCESS_FS_MAKE_SOCK |
+        _LANDLOCK_ACCESS_FS_MAKE_FIFO | _LANDLOCK_ACCESS_FS_MAKE_BLOCK |
+        _LANDLOCK_ACCESS_FS_MAKE_SYM
+    )
+    if abi >= 2:
+        all_access |= _LANDLOCK_ACCESS_FS_REFER
+    if abi >= 3:
+        all_access |= _LANDLOCK_ACCESS_FS_TRUNCATE
+
+    class RulesetAttr(ctypes.Structure):
+        _fields_ = [("handled_access_fs", ctypes.c_uint64)]
+
+    class PathBeneathAttr(ctypes.Structure):
+        # struct landlock_path_beneath_attr is __u64 followed by __s32.
+        # ctypes supplies the kernel's trailing alignment padding.
+        _fields_ = [("allowed_access", ctypes.c_uint64), ("parent_fd", ctypes.c_int32)]
+
+    if libc.prctl(pr_set_no_new_privs, 1, 0, 0, 0) != 0:
+        raise OSError(ctypes.get_errno(), "cannot set no-new-privileges")
+    ruleset = RulesetAttr(all_access)
+    fd = libc.syscall(create_ruleset, ctypes.byref(ruleset), ctypes.sizeof(ruleset), 0)
+    if fd < 0:
+        raise OSError(ctypes.get_errno(), "Landlock is unavailable")
+    # The child still needs to load its interpreter and shared libraries.
+    # Permit read/execute access to standard system trees, while granting the
+    # full set only beneath the configured workspace.
+    read_execute = (_LANDLOCK_ACCESS_FS_EXECUTE | _LANDLOCK_ACCESS_FS_READ_FILE |
+                    _LANDLOCK_ACCESS_FS_READ_DIR)
+    paths = [(root, all_access)]
+    for system_path in ("/bin", "/sbin", "/usr", "/lib", "/lib64", "/etc"):
+        if os.path.isdir(system_path):
+            paths.append((Path(system_path), read_execute))
+    # PATH may contain a virtualenv or another project-local installation that
+    # is not beneath a standard system directory.  Permit loading those files,
+    # but never grant them write access.
+    for path in read_paths:
+        try:
+            resolved = path.resolve()
+        except OSError:
+            continue
+        if resolved.is_dir() and resolved not in {item[0] for item in paths}:
+            paths.append((resolved, read_execute))
+    opened = []
+    try:
+        for path, access in paths:
+            path_fd = os.open(path, os.O_PATH | os.O_DIRECTORY)
+            opened.append(path_fd)
+            rule = PathBeneathAttr(access, path_fd)
+            if libc.syscall(add_rule, fd, _LANDLOCK_RULE_TYPE_PATH_BENEATH,
+                            ctypes.byref(rule), 0) != 0:
+                raise OSError(ctypes.get_errno(), f"cannot add Landlock rule for {path}")
+        if libc.syscall(restrict_self, fd, 0) != 0:
+            raise OSError(ctypes.get_errno(), "cannot restrict subprocess filesystem")
+    finally:
+        for path_fd in opened:
+            os.close(path_fd)
+        os.close(fd)
+
+
 def set_workspace_root(path: str | os.PathLike[str] | None) -> None:
     """Set the tool workspace and clear previously granted read-only roots."""
     _configure_workspace_root(path)
@@ -1474,7 +1597,7 @@ def _grep(pattern, path):
     root_fds = {}
     root_open_errors = {}
     try:
-        for allowed_root in [_workspace_root, *_read_only_roots]:
+        for allowed_root in [get_workspace_root(), *_read_only_roots]:
             try:
                 root_fds[allowed_root] = _open_root_for_read(allowed_root)
             except OSError as exc:
@@ -1764,8 +1887,22 @@ def _run_command(command):
                 return f"Error: command path is outside workspace: {e}"
 
     try:
+        # Capture the configured root once: workspace changes in another thread
+        # must not make cwd and the child sandbox refer to different trees.
+        workspace_root = get_workspace_root()
+        # A command can be installed in a virtualenv or another non-system PATH
+        # entry.  Landlock must allow the executable and Python's import roots to
+        # be read, otherwise an approved command cannot even start.
+        read_paths = {Path(sys.executable).parent}
+        executable_path = shutil.which(argv[0])
+        if executable_path:
+            read_paths.add(Path(executable_path).resolve().parent)
+        read_paths.update(Path(entry).resolve() for entry in sys.path if entry)
         result = subprocess.run(
-            argv, cwd=_workspace_root, shell=False,
+            argv, cwd=workspace_root, shell=False,
+            preexec_fn=lambda: _landlock_preexec(
+                workspace_root, tuple(read_paths)
+            ),
             capture_output=True, text=True, timeout=30,
         )
         output = result.stdout
@@ -1777,6 +1914,8 @@ def _run_command(command):
     except subprocess.TimeoutExpired:
         return "Error: command timed out after 30 seconds"
     except Exception as e:
+        if isinstance(e, OSError) and "Landlock" in str(e):
+            return f"Error running command: filesystem sandbox unavailable: {e}"
         return f"Error running command: {e}"
 
 
