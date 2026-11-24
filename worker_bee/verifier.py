@@ -41,7 +41,7 @@ Claim: {belief_text}
 {{
   "verified": true or false,
   "evidence": "the specific code or pattern that supports or contradicts the claim",
-  "justification": "detailed reasoning chain: what you looked at, what you found, and why it confirms or refutes the claim"
+  "comment": "detailed reasoning chain: what you looked at, what you found, and why it confirms or refutes the claim"
 }}
 ```
 
@@ -52,7 +52,7 @@ Rules:
 - Quote specific lines, function signatures, or patterns as evidence.
 - If the belief claims something is missing (no validation, no locking, etc.),
   search thoroughly before concluding it really is missing.
-- Your justification should trace your investigation: which files you read,
+- Your comment should trace your investigation: which files you read,
   what you found in each, and how the pieces connect to your verdict."""
 
 
@@ -154,8 +154,13 @@ def verify_unverified(
     verbose: bool = False,
     max_turns: int = 20,
     num_ctx: int | None = None,
+    retract_inaccurate: bool = False,
 ) -> list[VerifyResult]:
-    """Verify unverified gated beliefs against source code."""
+    """Verify unverified gated beliefs against source code.
+
+    Verification is evidence-only by default. Set ``retract_inaccurate`` to
+    enforce a negative verdict by retracting the belief.
+    """
     db_path = Path(db_path)
     belief_ids = _find_unverified_gated(str(db_path))
 
@@ -182,6 +187,7 @@ def verify_unverified(
                 verbose=verbose,
                 max_turns=max_turns,
                 num_ctx=num_ctx,
+                retract_inaccurate=retract_inaccurate,
             )
             results.append(result)
         except Exception as e:
@@ -240,8 +246,13 @@ def verify_belief(
     verbose: bool = False,
     max_turns: int = 20,
     num_ctx: int | None = None,
+    retract_inaccurate: bool = False,
 ) -> VerifyResult:
-    """Verify a belief using an agentic tool loop."""
+    """Verify a belief using an agentic tool loop.
+
+    A negative verdict remains evidence-only unless ``retract_inaccurate`` is
+    explicitly enabled.
+    """
     from worker_bee.editor import run_edit_loop
 
     trace = trace_belief(db_path, belief_id, project_dir=project_dir)
@@ -297,16 +308,31 @@ def verify_belief(
         code_found=trace.code_found,
         code_missing=trace.code_missing,
         verified=result.get("verified"),
+        confidence=result.get("confidence", ""),
         evidence=result.get("evidence", ""),
-        comment=result.get("justification", ""),
+        comment=result.get("comment", result.get("justification", "")),
     )
 
-    status = "VERIFIED" if verify.verified else "NOT VERIFIED"
+    status = (
+        "VERIFIED" if verify.verified is True
+        else "NOT VERIFIED" if verify.verified is False
+        else "UNDECIDED"
+    )
     print(f"\n  Result: {status}", file=sys.stderr)
     print(f"  Evidence: {verify.evidence}", file=sys.stderr)
-    print(f"  Justification: {verify.comment}", file=sys.stderr)
+    print(f"  Comment: {verify.comment}", file=sys.stderr)
 
     if verify.verified is not None:
+        # Enforce an explicitly requested negative verdict before recording the
+        # verification as complete.  If retraction fails, _update_db is not
+        # reached and the database cannot claim that the operation completed.
+        if verify.verified is False and retract_inaccurate:
+            from reasons.api import retract_node
+            retract_node(
+                verify.belief_id,
+                reason=f"worker-bee verification: {verify.comment}",
+                db_path=str(db_path),
+            )
         _update_db(str(db_path), verify)
 
     return verify
@@ -346,10 +372,13 @@ def _update_db(db_path: str, result: VerifyResult) -> None:
         node = net.nodes[result.belief_id]
         node.verified_at = now
         node.updated_at = now
+        if node.metadata is None:
+            node.metadata = {}
         node.metadata["verify_result"] = {
             "verified": result.verified,
+            "confidence": result.confidence,
             "evidence": result.evidence,
-            "justification": result.comment,
+            "comment": result.comment,
             "code_files": result.code_found,
             "verifier": "worker-bee",
         }

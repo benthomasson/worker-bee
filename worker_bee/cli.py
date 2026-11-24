@@ -40,6 +40,8 @@ def _main(argv: list[str] | None = None) -> int:
     sub_verify.add_argument("--num-ctx", type=int, default=None, help="Context window size")
     sub_verify.add_argument("--dry-run", action="store_true", help="Print prompt without dispatching")
     sub_verify.add_argument("--verbose", "-v", action="store_true", help="Print prompt before dispatching")
+    sub_verify.add_argument("--retract", action="store_true",
+                            help="Retract beliefs whose verification verdict is negative")
 
     sub_fix = subparsers.add_parser("fix", help="Fix a verified issue via code-editing loop")
     sub_fix.add_argument("db", help="Path to reasons.db")
@@ -201,12 +203,13 @@ def _main(argv: list[str] | None = None) -> int:
                 verbose=args.verbose,
                 max_turns=args.max_turns,
                 num_ctx=args.num_ctx,
+                retract_inaccurate=args.retract,
             )
             if result.verified is not None:
                 status = "VERIFIED" if result.verified else "NOT VERIFIED"
                 print(f"\n{result.belief_id}: {status}")
                 print(f"  Evidence: {result.evidence}")
-                print(f"  Justification: {result.comment}")
+                print(f"  Comment: {result.comment}")
         else:
             from worker_bee.verifier import verify_unverified
             results = verify_unverified(
@@ -218,6 +221,7 @@ def _main(argv: list[str] | None = None) -> int:
                 verbose=args.verbose,
                 max_turns=args.max_turns,
                 num_ctx=args.num_ctx,
+                retract_inaccurate=args.retract,
             )
             if results:
                 verified = sum(1 for r in results if r.verified)

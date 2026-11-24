@@ -16,6 +16,41 @@ def test_no_command_prints_help_and_succeeds(capsys):
     assert "usage:" in captured.out
 
 
+def test_verify_forwards_retract_option():
+    with patch("worker_bee.verifier.verify_belief") as verify:
+        verify.return_value.verified = None
+        assert main(["verify", "brain.db", "belief", "--retract"]) == 0
+    verify.assert_called_once_with(
+        "brain.db", "belief", project_dir=None, model="ollama:qwen3.8:27b",
+        dry_run=False, verbose=False, max_turns=20, num_ctx=None,
+        retract_inaccurate=True,
+    )
+
+
+def test_verify_single_defaults_to_evidence_only():
+    with patch("worker_bee.verifier.verify_belief") as verify:
+        verify.return_value.verified = None
+        assert main(["verify", "brain.db", "belief"]) == 0
+    assert verify.call_args.kwargs["retract_inaccurate"] is False
+
+
+@pytest.mark.parametrize("argv, expected", [
+    (["verify", "brain.db"], False),
+    (["verify", "brain.db", "--retract"], True),
+])
+def test_verify_batch_forwards_retract_option(argv, expected):
+    with patch("worker_bee.verifier.verify_unverified", return_value=[]) as verify:
+        assert main(argv) == 0
+    assert verify.call_args.kwargs["retract_inaccurate"] is expected
+
+
+def test_verify_help_describes_retract_flag(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        main(["verify", "--help"])
+    assert exc_info.value.code == 0
+    assert "--retract" in capsys.readouterr().out
+
+
 def test_run_forwards_progress_options(tmp_path):
     with patch("worker_bee.pipeline.run_pipeline") as run:
         assert main(["run", "brain.db", "--progress-file", str(tmp_path / "p.json"), "--resume"]) == 0
