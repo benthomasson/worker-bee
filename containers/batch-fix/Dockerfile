@@ -21,7 +21,7 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 RUN export PATH=$HOME/.local/bin:$PATH \
     && uv python install 3.14 \
     && uv tool install --python 3.14 "reasonsforge[openai,forge] @ git+https://github.com/benthomasson/reasonsforge" \
-    && uv tool install --python 3.14 git+https://github.com/benthomasson/worker-bee
+    && uv tool install --python 3.14 "worker-bee[openai] @ git+https://github.com/benthomasson/worker-bee"
 
 RUN mkdir -p /home/${BEE_USER}/workspace
 

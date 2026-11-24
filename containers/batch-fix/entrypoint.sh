@@ -26,6 +26,15 @@
 
 export PATH="/home/bee/.local/bin:$HOME/.local/bin:$PATH"
 
+# When running as a different UID (mount mode with --user), /home/bee
+# directories are unwritable.  Fall back to /tmp for venv and cache.
+if [ -w /home/bee ]; then
+    export UV_PROJECT_ENVIRONMENT="/home/bee/.venvs/repo"
+else
+    export UV_PROJECT_ENVIRONMENT="/tmp/uv-venv-$$"
+    export UV_CACHE_DIR="/tmp/uv-cache-$$"
+fi
+
 TASK_TYPE="${TASK_TYPE:-batch-fix}"
 MODEL="${MODEL:-openai:gpt-5.6-luna}"
 MAX_TURNS="${MAX_TURNS:-1000}"
@@ -96,6 +105,19 @@ clone_or_detect_repo "${EXPERT_URL:-}" "$EXPERT_DIR" "expert knowledge base"
 
 if [ ! -f "$DB_PATH" ]; then
     fail "No reasons.db found at $DB_PATH"
+fi
+
+# If the database isn't writable (UID mismatch in mount mode), copy it
+# to a temp location so worker-bee can retract/update beliefs.
+ORIG_DB_PATH="$DB_PATH"
+if [ ! -w "$DB_PATH" ]; then
+    step "Database not writable — copying to temp location"
+    TEMP_DB="/tmp/reasons-$$.db"
+    cp "$DB_PATH" "$TEMP_DB"
+    # Copy WAL/SHM if they exist
+    [ -f "${DB_PATH}-wal" ] && cp "${DB_PATH}-wal" "${TEMP_DB}-wal"
+    [ -f "${DB_PATH}-shm" ] && cp "${DB_PATH}-shm" "${TEMP_DB}-shm"
+    DB_PATH="$TEMP_DB"
 fi
 
 # ─── Configure git push credentials ───
@@ -173,8 +195,10 @@ run_verify() {
 
     log "Verifying belief: $BELIEF_ID"
 
-    cd "$REPO_DIR"
-    uv run worker-bee verify "$DB_PATH" "$BELIEF_ID" \
+    SCRATCH_DIR="/tmp/worker-bee-$$"
+    mkdir -p "$SCRATCH_DIR"
+    cd "$SCRATCH_DIR"
+    worker-bee verify "$DB_PATH" "$BELIEF_ID" \
         --project-dir "$REPO_DIR" \
         --model "$MODEL" \
         --max-turns "$MAX_TURNS" \
@@ -201,3 +225,14 @@ case "$TASK_TYPE" in
         fail "Unknown task type: $TASK_TYPE"
         ;;
 esac
+
+# Copy the database back if we used a temp copy
+if [ "$DB_PATH" != "$ORIG_DB_PATH" ] && [ -f "$DB_PATH" ]; then
+    if cp "$DB_PATH" "$ORIG_DB_PATH" 2>/dev/null; then
+        step "Database copied back to $ORIG_DB_PATH"
+        [ -f "${DB_PATH}-wal" ] && cp "${DB_PATH}-wal" "${ORIG_DB_PATH}-wal" 2>/dev/null
+        [ -f "${DB_PATH}-shm" ] && cp "${DB_PATH}-shm" "${ORIG_DB_PATH}-shm" 2>/dev/null
+    else
+        step "WARNING: Could not copy database back — results in $DB_PATH inside container only"
+    fi
+fi

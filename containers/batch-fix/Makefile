@@ -41,10 +41,13 @@ fix:
 		$(IMAGE):$(TAG)
 
 # ─── Mount mode: bind-mount local repos (no credentials needed, faster) ───
+# Uses --security-opt label=disable to avoid SELinux relabeling issues
+# and read-only repo mount (expert is rw for DB updates).
 
 run-local:
 	podman run -it \
-		-v $(REPO_PATH):/home/bee/workspace/repo \
+		--security-opt label=disable \
+		-v $(REPO_PATH):/home/bee/workspace/repo:ro \
 		-v $(EXPERT_PATH):/home/bee/workspace/expert \
 		-e OPENAI_API_KEY=$(OPENAI_API_KEY) \
 		-e TASK_TYPE=batch-fix \
@@ -54,7 +57,8 @@ run-local:
 
 fix-local:
 	podman run -it \
-		-v $(REPO_PATH):/home/bee/workspace/repo \
+		--security-opt label=disable \
+		-v $(REPO_PATH):/home/bee/workspace/repo:ro \
 		-v $(EXPERT_PATH):/home/bee/workspace/expert \
 		-e OPENAI_API_KEY=$(OPENAI_API_KEY) \
 		-e TASK_TYPE=fix-belief \
@@ -64,7 +68,8 @@ fix-local:
 
 verify-local:
 	podman run -it \
-		-v $(REPO_PATH):/home/bee/workspace/repo \
+		--security-opt label=disable \
+		-v $(REPO_PATH):/home/bee/workspace/repo:ro \
 		-v $(EXPERT_PATH):/home/bee/workspace/expert \
 		-e OPENAI_API_KEY=$(OPENAI_API_KEY) \
 		-e TASK_TYPE=verify \
