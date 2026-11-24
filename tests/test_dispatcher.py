@@ -152,3 +152,27 @@ def test_dispatch_chat_uses_configured_limiter():
         configure_rate_limit("chat-test", None)
     acquire.assert_called_once_with("chat-test")
     create.return_value.send.assert_called_once()
+
+
+def test_dispatch_chat_forwards_timeout_to_provider():
+    with patch("worker_bee.dispatcher.create_provider") as create:
+        dispatch_chat([], model="chat-test", timeout=17)
+
+    create.return_value.send.assert_called_once_with(
+        [], "", [], max_tokens=8096, num_ctx=None, timeout=17
+    )
+
+
+def test_dispatch_chat_supports_legacy_provider_send_signature():
+    class LegacyProvider:
+        def __init__(self):
+            self.arguments = None
+
+        def send(self, messages, system, tools, max_tokens=8096, num_ctx=None):
+            self.arguments = (messages, system, tools, max_tokens, num_ctx)
+            return "response"
+
+    provider = LegacyProvider()
+    with patch("worker_bee.dispatcher.create_provider", return_value=provider):
+        assert dispatch_chat([], model="chat-test", timeout=17) == "response"
+    assert provider.arguments == ([], "", [], 8096, None)

@@ -14,8 +14,10 @@ counts and costs. Use get_cost_summary() to retrieve accumulated stats.
 import json
 import os
 import shutil
+import socket
 import subprocess
 import threading
+import urllib.error
 import urllib.request
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -207,6 +209,14 @@ def resolve_model_cmd(model: str) -> list[str]:
     raise ValueError(f"Unknown model: {model}. Available: {available}")
 
 
+def _normalize_provider_exception(exc: Exception, model: str, timeout: int) -> None:
+    """Raise the public provider error corresponding to an SDK exception."""
+    exc_name = type(exc).__name__
+    if "timeout" in exc_name.lower() or "timeout" in str(exc).lower():
+        raise subprocess.TimeoutExpired(model, timeout) from exc
+    raise RuntimeError(f"{model} failed: {exc}") from exc
+
+
 def _invoke_api(prompt: str, model: str, timeout: int = 300) -> str:
     """Invoke an LLM via LangChain API adapter. Returns response text."""
     prefix, name = model.split(":", 1)
@@ -246,10 +256,7 @@ def _invoke_api(prompt: str, model: str, timeout: int = 300) -> str:
     try:
         response = llm.invoke(prompt, config=config)
     except Exception as exc:
-        exc_name = type(exc).__name__
-        if "timeout" in exc_name.lower() or "timeout" in str(exc).lower():
-            raise subprocess.TimeoutExpired(model, timeout) from exc
-        raise RuntimeError(f"{model} failed: {exc}") from exc
+        _normalize_provider_exception(exc, model, timeout)
 
     response_metadata = getattr(response, "response_metadata", None) or {}
     usage = getattr(response, "usage_metadata", None) or response_metadata.get("usage", {})
@@ -321,12 +328,15 @@ def _invoke_openai(prompt: str, model: str, timeout: int = 300) -> str:
             "Install with: pip install openai"
         )
     openai_model = model.split(":", 1)[1]
-    client = _openai_mod.OpenAI()
-    response = client.responses.create(
-        model=openai_model,
-        input=prompt,
-        timeout=timeout,
-    )
+    try:
+        client = _openai_mod.OpenAI()
+        response = client.responses.create(
+            model=openai_model,
+            input=prompt,
+            timeout=timeout,
+        )
+    except Exception as exc:
+        _normalize_provider_exception(exc, model, timeout)
     text = ""
     for item in response.output:
         if item.type == "message":
@@ -364,6 +374,8 @@ def _invoke_ollama(prompt: str, model: str, timeout: int = 300) -> str:
         body = e.read().decode(errors="replace")
         raise RuntimeError(f"Ollama error: {body}") from e
     except urllib.error.URLError as e:
+        if isinstance(e.reason, (socket.timeout, TimeoutError)):
+            _normalize_provider_exception(e.reason, model, timeout)
         raise RuntimeError(
             f"Cannot connect to Ollama at {base_url} — is it running? ({e})"
         ) from e
@@ -448,14 +460,18 @@ class _AnthropicProvider:
             from anthropic import Anthropic
             self.client = Anthropic()
 
-    def send(self, messages, system, tools, max_tokens=8096, num_ctx=None):
-        return self.client.messages.create(
-            model=self.model,
-            max_tokens=max_tokens,
-            system=system,
-            messages=messages,
-            tools=tools,
-        )
+    def send(self, messages, system, tools, max_tokens=8096, num_ctx=None, timeout=300):
+        try:
+            return self.client.messages.create(
+                model=self.model,
+                max_tokens=max_tokens,
+                system=system,
+                messages=messages,
+                tools=tools,
+                timeout=timeout,
+            )
+        except Exception as exc:
+            _normalize_provider_exception(exc, self.model, timeout)
 
 
 class _OllamaProvider:
@@ -481,7 +497,7 @@ class _OllamaProvider:
         self.base_url = base_url or os.environ.get("OLLAMA_HOST", "http://localhost:11434")
         self._tool_id_counter = 0
 
-    def send(self, messages, system, tools, max_tokens=8096, num_ctx=None):
+    def send(self, messages, system, tools, max_tokens=8096, num_ctx=None, timeout=300):
         ollama_messages = self._convert_messages(messages, system)
         ollama_tools = self._convert_tools(tools)
 
@@ -506,8 +522,10 @@ class _OllamaProvider:
         )
 
         try:
-            with urllib.request.urlopen(req, timeout=300) as resp:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
                 result = json.loads(resp.read())
+        except TimeoutError as exc:
+            _normalize_provider_exception(exc, f"ollama:{self.model}", timeout)
         except urllib.error.HTTPError as e:
             body = e.read().decode(errors="replace")
             try:
@@ -516,6 +534,8 @@ class _OllamaProvider:
                 detail = body
             raise RuntimeError(f"Ollama error: {detail}") from e
         except urllib.error.URLError as e:
+            if isinstance(e.reason, (socket.timeout, TimeoutError)):
+                _normalize_provider_exception(e.reason, f"ollama:{self.model}", timeout)
             raise RuntimeError(
                 f"Cannot connect to Ollama at {self.base_url} — is it running? ({e})"
             ) from e
@@ -644,7 +664,7 @@ class _OpenAIProvider:
             )
         self.client = _openai_mod.OpenAI()
 
-    def send(self, messages, system, tools, max_tokens=8096, num_ctx=None):
+    def send(self, messages, system, tools, max_tokens=8096, num_ctx=None, timeout=300):
         input_items = self._convert_messages(messages)
         openai_tools = self._convert_tools(tools) if tools else None
 
@@ -657,7 +677,11 @@ class _OpenAIProvider:
         if openai_tools:
             kwargs["tools"] = openai_tools
 
-        response = self.client.responses.create(**kwargs)
+        kwargs["timeout"] = timeout
+        try:
+            response = self.client.responses.create(**kwargs)
+        except Exception as exc:
+            _normalize_provider_exception(exc, f"openai:{self.model}", timeout)
 
         if response.usage:
             _record_cost(

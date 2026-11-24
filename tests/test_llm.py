@@ -1,7 +1,132 @@
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier, Lock
+from types import SimpleNamespace
+import socket
+import subprocess
+import urllib.error
+
+import pytest
 
 import worker_bee.llm as llm
+
+
+def test_openai_simple_invocation_normalizes_timeout(monkeypatch):
+    class SDKTimeout(Exception):
+        pass
+
+    class FakeResponses:
+        def create(self, **kwargs):
+            assert kwargs["timeout"] == 17
+            raise SDKTimeout("request timeout")
+
+    class FakeClient:
+        responses = FakeResponses()
+
+    monkeypatch.setattr(llm, "_HAS_OPENAI", True)
+    monkeypatch.setattr(llm._openai_mod, "OpenAI", lambda: FakeClient())
+
+    with pytest.raises(subprocess.TimeoutExpired) as error:
+        llm._invoke_openai("hello", "openai:test", timeout=17)
+    assert error.value.timeout == 17
+
+
+def test_openai_tool_invocation_normalizes_timeout(monkeypatch):
+    class SDKTimeout(Exception):
+        pass
+
+    class FakeResponses:
+        def create(self, **kwargs):
+            assert kwargs["timeout"] == 23
+            raise SDKTimeout("request timed out")
+
+    provider = object.__new__(llm._OpenAIProvider)
+    provider.model = "test"
+    provider.client = SimpleNamespace(responses=FakeResponses())
+
+    with pytest.raises(subprocess.TimeoutExpired) as error:
+        provider.send([], "", [], timeout=23)
+    assert error.value.timeout == 23
+
+
+def test_openai_tool_invocation_normalizes_errors_and_passes_timeout(monkeypatch):
+    class FakeResponses:
+        def create(self, **kwargs):
+            assert kwargs["timeout"] == 23
+            raise ValueError("bad request")
+
+    provider = object.__new__(llm._OpenAIProvider)
+    provider.model = "test"
+    provider.client = SimpleNamespace(responses=FakeResponses())
+
+    with pytest.raises(RuntimeError, match="openai:test failed: bad request"):
+        provider.send([], "", [], timeout=23)
+
+
+def test_anthropic_provider_passes_timeout():
+    class FakeMessages:
+        def create(self, **kwargs):
+            assert kwargs["timeout"] == 19
+            return "response"
+
+    provider = object.__new__(llm._AnthropicProvider)
+    provider.model = "claude-test"
+    provider.client = SimpleNamespace(messages=FakeMessages())
+
+    assert provider.send([], "system", [], timeout=19) == "response"
+
+
+def test_anthropic_provider_normalizes_timeout():
+    class SDKTimeout(Exception):
+        pass
+
+    class FakeMessages:
+        def create(self, **kwargs):
+            raise SDKTimeout("timed out")
+
+    provider = object.__new__(llm._AnthropicProvider)
+    provider.model = "claude-test"
+    provider.client = SimpleNamespace(messages=FakeMessages())
+
+    with pytest.raises(subprocess.TimeoutExpired) as error:
+        provider.send([], "system", [], timeout=19)
+    assert error.value.timeout == 19
+
+
+def test_ollama_provider_passes_timeout(monkeypatch):
+    calls = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return b'{"message": {"content": "ok"}}'
+
+    def fake_urlopen(request, timeout):
+        calls.append(timeout)
+        return FakeResponse()
+
+    provider = llm._OllamaProvider("test", base_url="http://ollama")
+    monkeypatch.setattr(llm.urllib.request, "urlopen", fake_urlopen)
+
+    provider.send([], "system", [], timeout=29)
+    assert calls == [29]
+
+
+def test_ollama_provider_normalizes_wrapped_socket_timeout(monkeypatch):
+    provider = llm._OllamaProvider("test", base_url="http://ollama")
+
+    def fake_urlopen(request, timeout):
+        raise urllib.error.URLError(socket.timeout("timed out"))
+
+    monkeypatch.setattr(llm.urllib.request, "urlopen", fake_urlopen)
+
+    with pytest.raises(subprocess.TimeoutExpired) as error:
+        provider.send([], "system", [], timeout=29)
+    assert error.value.timeout == 29
 
 
 def test_cli_parse_failure_records_call_without_known_usage():

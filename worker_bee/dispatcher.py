@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+import inspect
 import math
 import threading
 import time
@@ -137,15 +138,32 @@ def dispatch_chat(
     tools: list[dict] | None = None,
     max_tokens: int = 8096,
     num_ctx: int | None = None,
+    timeout: int = 300,
 ) -> ChatResponse:
     """Send a multi-turn conversation with optional tool use.
 
-    Uses create_provider() for the full chat API with tool support.
+    Uses create_provider() for the full chat API with tool support. ``timeout``
+    is passed to providers that support the shared timeout contract.
     Returns a ChatResponse with content blocks (TextBlock, ToolUseBlock).
     """
     _acquire_rate_limit(model)
     provider = create_provider(model)
-    return provider.send(messages, system, tools or [], max_tokens=max_tokens, num_ctx=num_ctx)
+    send = provider.send
+    # Keep the pre-timeout provider API usable for custom providers while
+    # forwarding the timeout to providers that implement the shared contract.
+    try:
+        parameters = inspect.signature(send).parameters.values()
+        accepts_timeout = any(
+            parameter.name == "timeout"
+            or parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters
+        )
+    except (TypeError, ValueError):
+        accepts_timeout = True
+    kwargs = {"max_tokens": max_tokens, "num_ctx": num_ctx}
+    if accepts_timeout:
+        kwargs["timeout"] = timeout
+    return send(messages, system, tools or [], **kwargs)
 
 
 def dispatch_batch(
