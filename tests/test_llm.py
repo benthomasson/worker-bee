@@ -62,6 +62,21 @@ def test_openai_tool_invocation_normalizes_errors_and_passes_timeout(monkeypatch
         provider.send([], "", [], timeout=23)
 
 
+def test_anthropic_provider_records_unknown_usage():
+    llm.reset_cost_tracker()
+
+    class FakeMessages:
+        def create(self, **kwargs):
+            return SimpleNamespace(usage=None)
+
+    provider = object.__new__(llm._AnthropicProvider)
+    provider.model = "claude-test"
+    provider.client = SimpleNamespace(messages=FakeMessages())
+
+    provider.send([], "system", [], timeout=19)
+    assert llm.get_cost_summary()["usage_unknown_calls"] == 1
+
+
 def test_anthropic_provider_passes_timeout():
     class FakeMessages:
         def create(self, **kwargs):
@@ -138,12 +153,14 @@ def test_cli_parse_failure_records_call_without_known_usage():
         "calls": 1,
         "input_tokens": 0,
         "output_tokens": 0,
+        "usage_unknown_calls": 1,
         "total_cost_usd": 0.0,
         "by_model": {
             "claude": {
                 "calls": 1,
                 "input_tokens": 0,
                 "output_tokens": 0,
+                "usage_unknown_calls": 1,
                 "total_cost_usd": 0.0,
             }
         },
@@ -156,9 +173,109 @@ def test_cli_non_object_json_records_call_without_known_usage():
 
     output = "[1, 2, 3]"
     assert llm._parse_cli_json(output, "gemini") == output
-    assert llm.get_cost_summary()["calls"] == 1
-    assert llm.get_cost_summary()["by_model"]["gemini"]["calls"] == 1
+    summary = llm.get_cost_summary()
+    assert summary["calls"] == 1
+    assert summary["usage_unknown_calls"] == 1
+    assert summary["by_model"]["gemini"]["calls"] == 1
+    assert summary["by_model"]["gemini"]["usage_unknown_calls"] == 1
     assert llm.get_last_usage() == {"prompt_tokens": 0, "completion_tokens": 0}
+
+
+def test_cli_null_and_partial_usage_are_unknown():
+    llm.reset_cost_tracker()
+
+    llm._parse_cli_json('{"result":"ok","usage":null}', "claude")
+    llm._parse_cli_json('{"response":"ok","stats":{"models":{"main":{"tokens":{"input":3}}}}}', "gemini")
+
+    summary = llm.get_cost_summary()
+    assert summary["calls"] == 2
+    assert summary["usage_unknown_calls"] == 2
+
+
+def test_invalid_token_values_are_normalized_and_marked_unknown():
+    llm.reset_cost_tracker()
+
+    llm._record_cost("bad", None, "10", 0.0)
+
+    summary = llm.get_cost_summary()
+    assert summary["calls"] == 1
+    assert summary["usage_unknown_calls"] == 1
+    assert summary["input_tokens"] == 0
+    assert summary["output_tokens"] == 0
+
+
+def test_cli_invalid_cache_usage_is_unknown():
+    llm.reset_cost_tracker()
+
+    llm._parse_cli_json(
+        '{"result":"ok","usage":{"input_tokens":2,"output_tokens":3,'
+        '"cache_read_input_tokens":"bad"}}',
+        "claude",
+    )
+
+    summary = llm.get_cost_summary()
+    assert summary["calls"] == 1
+    assert summary["usage_unknown_calls"] == 1
+    assert summary["input_tokens"] == 2
+    assert summary["output_tokens"] == 3
+
+
+def test_api_invalid_usage_is_unknown(monkeypatch):
+    class FakeLLM:
+        def invoke(self, prompt, config):
+            return SimpleNamespace(content="ok", usage_metadata={"input_tokens": None, "output_tokens": 3})
+
+    monkeypatch.setattr(llm, "_HAS_LANGCHAIN_ANTHROPIC", True)
+    monkeypatch.setattr(llm, "ChatAnthropic", lambda **kwargs: FakeLLM())
+    llm.reset_cost_tracker()
+
+    assert llm._invoke_api("hello", "api:test") == "ok"
+    assert llm.get_cost_summary()["usage_unknown_calls"] == 1
+
+
+def test_ollama_invalid_usage_is_unknown(monkeypatch):
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return b'{"response":"ok","prompt_eval_count":null,"eval_count":"3"}'
+
+    monkeypatch.setattr(llm.urllib.request, "urlopen", lambda request, timeout: FakeResponse())
+    llm.reset_cost_tracker()
+
+    assert llm._invoke_ollama("hello", "ollama:test") == "ok"
+    assert llm.get_cost_summary()["usage_unknown_calls"] == 1
+
+
+def test_openai_tool_invalid_usage_is_unknown():
+    provider = object.__new__(llm._OpenAIProvider)
+    provider.model = "test"
+    provider.client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kwargs: SimpleNamespace(
+        output=[], usage=SimpleNamespace(input_tokens=None, output_tokens=3))))
+    llm.reset_cost_tracker()
+
+    provider.send([], "", [])
+    assert llm.get_cost_summary()["usage_unknown_calls"] == 1
+
+
+def test_cost_summary_formats_unknown_usage_and_reset_clears_it():
+    llm.reset_cost_tracker()
+    llm._record_cost("test", 0, 0, 0.0, usage_known=False)
+
+    assert "1 call(s) with unknown usage" in llm.format_cost_summary()
+    llm.reset_cost_tracker()
+    assert llm.get_cost_summary() == {
+        "calls": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "usage_unknown_calls": 0,
+        "total_cost_usd": 0.0,
+        "by_model": {},
+    }
 
 
 def test_langfuse_handler_initialization_is_thread_safe(monkeypatch):

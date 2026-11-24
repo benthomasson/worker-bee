@@ -69,6 +69,7 @@ _cost_tracker = {
     "calls": 0,
     "input_tokens": 0,
     "output_tokens": 0,
+    "usage_unknown_calls": 0,
     "total_cost_usd": 0.0,
     "by_model": {},
 }
@@ -80,6 +81,7 @@ def reset_cost_tracker():
         _cost_tracker["calls"] = 0
         _cost_tracker["input_tokens"] = 0
         _cost_tracker["output_tokens"] = 0
+        _cost_tracker["usage_unknown_calls"] = 0
         _cost_tracker["total_cost_usd"] = 0.0
         _cost_tracker["by_model"] = {}
 
@@ -101,28 +103,59 @@ def format_cost_summary() -> str:
         if s["total_cost_usd"] > 0:
             parts.append(f"${s['total_cost_usd']:.4f}")
         parts.append(f"{s['input_tokens']:,} input + {s['output_tokens']:,} output tokens")
+        if s["usage_unknown_calls"]:
+            parts.append(f"{s['usage_unknown_calls']} call(s) with unknown usage")
         parts.append(f"{s['calls']} call(s)")
         return "Cost: " + " | ".join(parts)
 
 
-def _record_cost(model: str, input_tokens: int, output_tokens: int, cost_usd: float):
-    """Record token/cost stats from one LLM call and expose its usage."""
+def _valid_token_count(value) -> bool:
+    """Return whether a provider token field is a usable count."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _record_cost(
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cost_usd: float,
+    *,
+    usage_known: bool = True,
+):
+    """Record token/cost stats from one LLM call and expose its usage.
+
+    Missing provider metadata remains zero in the legacy token totals, but is
+    tracked separately so summaries cannot present an unknown call as a
+    measured zero-token call.
+    """
+    # Provider metadata is external input.  Normalize it here so a malformed
+    # value cannot make accounting itself fail, regardless of the caller.
+    input_valid = _valid_token_count(input_tokens)
+    output_valid = _valid_token_count(output_tokens)
+    input_tokens = input_tokens if input_valid else 0
+    output_tokens = output_tokens if output_valid else 0
+    usage_known = usage_known and input_valid and output_valid
     _last_usage.set({
-        "prompt_tokens": int(input_tokens or 0),
-        "completion_tokens": int(output_tokens or 0),
+        "prompt_tokens": input_tokens,
+        "completion_tokens": output_tokens,
     })
     with _cost_lock:
         _cost_tracker["calls"] += 1
+        if not usage_known:
+            _cost_tracker["usage_unknown_calls"] += 1
         _cost_tracker["input_tokens"] += input_tokens
         _cost_tracker["output_tokens"] += output_tokens
         _cost_tracker["total_cost_usd"] += cost_usd
 
         if model not in _cost_tracker["by_model"]:
             _cost_tracker["by_model"][model] = {
-                "calls": 0, "input_tokens": 0, "output_tokens": 0, "total_cost_usd": 0.0,
+                "calls": 0, "input_tokens": 0, "output_tokens": 0,
+                "usage_unknown_calls": 0, "total_cost_usd": 0.0,
             }
         m = _cost_tracker["by_model"][model]
         m["calls"] += 1
+        if not usage_known:
+            m["usage_unknown_calls"] += 1
         m["input_tokens"] += input_tokens
         m["output_tokens"] += output_tokens
         m["total_cost_usd"] += cost_usd
@@ -139,32 +172,66 @@ def _parse_cli_json(output: str, model: str) -> str:
         # The response is still a completed model call even when its JSON
         # envelope is malformed.  Record the call with unknown usage rather
         # than silently dropping it from accounting.
-        _record_cost(model, 0, 0, 0.0)
+        _record_cost(model, 0, 0, 0.0, usage_known=False)
         return output
 
     if not isinstance(data, dict):
         # Valid JSON scalars/arrays cannot contain provider usage metadata.
-        _record_cost(model, 0, 0, 0.0)
+        _record_cost(model, 0, 0, 0.0, usage_known=False)
         return output
 
     if model.startswith("gemini") or model.startswith("gemini:"):
         text = data.get("response", output)
-        stats = data.get("stats", {})
+        stats = data.get("stats")
+        models = stats.get("models") if isinstance(stats, dict) else None
         input_tokens = 0
         output_tokens = 0
-        for model_stats in stats.get("models", {}).values():
-            tokens = model_stats.get("tokens", {})
-            input_tokens += tokens.get("input", 0)
-            output_tokens += tokens.get("candidates", 0)
-        _record_cost(model, input_tokens, output_tokens, 0.0)
+        usage_known = isinstance(models, dict) and bool(models)
+        if usage_known:
+            for model_stats in models.values():
+                tokens = model_stats.get("tokens") if isinstance(model_stats, dict) else None
+                if not isinstance(tokens, dict):
+                    usage_known = False
+                    continue
+                input = tokens.get("input")
+                candidates = tokens.get("candidates")
+                if not (_valid_token_count(input) and _valid_token_count(candidates)):
+                    usage_known = False
+                    continue
+                input_tokens += input
+                output_tokens += candidates
+        _record_cost(
+            model, input_tokens, output_tokens, 0.0,
+            usage_known=usage_known,
+        )
         return text
 
     text = data.get("result", output)
-    usage = data.get("usage", {})
-    input_tokens = usage.get("input_tokens", 0) + usage.get("cache_creation_input_tokens", 0) + usage.get("cache_read_input_tokens", 0)
-    output_tokens = usage.get("output_tokens", 0)
+    usage = data.get("usage")
+    usage_known = (
+        isinstance(usage, dict)
+        and _valid_token_count(usage.get("input_tokens"))
+        and _valid_token_count(usage.get("output_tokens"))
+    )
+    input_tokens = 0
+    output_tokens = 0
+    if isinstance(usage, dict):
+        input_tokens = usage.get("input_tokens", 0)
+        output_tokens = usage.get("output_tokens", 0)
+        if _valid_token_count(input_tokens):
+            for key in ("cache_creation_input_tokens", "cache_read_input_tokens"):
+                if key in usage:
+                    value = usage[key]
+                    if not _valid_token_count(value):
+                        usage_known = False
+                    else:
+                        input_tokens += value
+        else:
+            input_tokens = 0
+        if not _valid_token_count(output_tokens):
+            output_tokens = 0
     cost_usd = data.get("total_cost_usd", 0.0)
-    _record_cost(model, input_tokens, output_tokens, cost_usd)
+    _record_cost(model, input_tokens, output_tokens, cost_usd, usage_known=usage_known)
     return text
 
 
@@ -260,12 +327,19 @@ def _invoke_api(prompt: str, model: str, timeout: int = 300) -> str:
 
     response_metadata = getattr(response, "response_metadata", None) or {}
     usage = getattr(response, "usage_metadata", None) or response_metadata.get("usage", {})
-    if usage:
-        input_tokens = usage.get("input_tokens", usage.get("prompt_tokens", 0))
-        output_tokens = usage.get("output_tokens", usage.get("completion_tokens", 0))
-        _record_cost(model, input_tokens, output_tokens, 0.0)
+    if isinstance(usage, dict):
+        input_tokens = usage.get("input_tokens", usage.get("prompt_tokens"))
+        output_tokens = usage.get("output_tokens", usage.get("completion_tokens"))
     else:
-        _last_usage.set({"prompt_tokens": 0, "completion_tokens": 0})
+        input_tokens = output_tokens = None
+    usage_known = _valid_token_count(input_tokens) and _valid_token_count(output_tokens)
+    _record_cost(
+        model,
+        input_tokens if usage_known else 0,
+        output_tokens if usage_known else 0,
+        0.0,
+        usage_known=usage_known,
+    )
     return response.content
 
 
@@ -343,9 +417,17 @@ def _invoke_openai(prompt: str, model: str, timeout: int = 300) -> str:
             for part in item.content:
                 if hasattr(part, "text"):
                     text += part.text
-    input_tokens = response.usage.input_tokens if response.usage else 0
-    output_tokens = response.usage.output_tokens if response.usage else 0
-    _record_cost(model, input_tokens, output_tokens, 0.0)
+    usage = getattr(response, "usage", None)
+    input_tokens = getattr(usage, "input_tokens", None) if usage else None
+    output_tokens = getattr(usage, "output_tokens", None) if usage else None
+    usage_known = _valid_token_count(input_tokens) and _valid_token_count(output_tokens)
+    _record_cost(
+        model,
+        input_tokens if usage_known else 0,
+        output_tokens if usage_known else 0,
+        0.0,
+        usage_known=usage_known,
+    )
     return text
 
 
@@ -382,9 +464,19 @@ def _invoke_ollama(prompt: str, model: str, timeout: int = 300) -> str:
 
     output = result.get("response", "")
 
-    prompt_tokens = result.get("prompt_eval_count", 0)
-    completion_tokens = result.get("eval_count", 0)
-    _record_cost(model, prompt_tokens, completion_tokens, 0.0)
+    prompt_tokens = result.get("prompt_eval_count")
+    completion_tokens = result.get("eval_count")
+    usage_known = (
+        _valid_token_count(prompt_tokens)
+        and _valid_token_count(completion_tokens)
+    )
+    _record_cost(
+        model,
+        prompt_tokens if usage_known else 0,
+        completion_tokens if usage_known else 0,
+        0.0,
+        usage_known=usage_known,
+    )
 
     if "Thinking...\n" in output:
         parts = output.split("...done thinking.\n", 1)
@@ -462,7 +554,7 @@ class _AnthropicProvider:
 
     def send(self, messages, system, tools, max_tokens=8096, num_ctx=None, timeout=300):
         try:
-            return self.client.messages.create(
+            response = self.client.messages.create(
                 model=self.model,
                 max_tokens=max_tokens,
                 system=system,
@@ -472,6 +564,19 @@ class _AnthropicProvider:
             )
         except Exception as exc:
             _normalize_provider_exception(exc, self.model, timeout)
+
+        usage = getattr(response, "usage", None)
+        input_tokens = getattr(usage, "input_tokens", None) if usage is not None else None
+        output_tokens = getattr(usage, "output_tokens", None) if usage is not None else None
+        usage_known = _valid_token_count(input_tokens) and _valid_token_count(output_tokens)
+        _record_cost(
+            self.model,
+            input_tokens if usage_known else 0,
+            output_tokens if usage_known else 0,
+            0.0,
+            usage_known=usage_known,
+        )
+        return response
 
 
 class _OllamaProvider:
@@ -540,6 +645,19 @@ class _OllamaProvider:
                 f"Cannot connect to Ollama at {self.base_url} — is it running? ({e})"
             ) from e
 
+        prompt_tokens = result.get("prompt_eval_count")
+        completion_tokens = result.get("eval_count")
+        usage_known = (
+            _valid_token_count(prompt_tokens)
+            and _valid_token_count(completion_tokens)
+        )
+        _record_cost(
+            f"ollama:{self.model}",
+            prompt_tokens if usage_known else 0,
+            completion_tokens if usage_known else 0,
+            0.0,
+            usage_known=usage_known,
+        )
         return self._parse_response(result)
 
     def _convert_messages(self, messages, system):
@@ -683,13 +801,17 @@ class _OpenAIProvider:
         except Exception as exc:
             _normalize_provider_exception(exc, f"openai:{self.model}", timeout)
 
-        if response.usage:
-            _record_cost(
-                f"openai:{self.model}",
-                response.usage.input_tokens,
-                response.usage.output_tokens,
-                0.0,
-            )
+        usage = getattr(response, "usage", None)
+        input_tokens = getattr(usage, "input_tokens", None) if usage is not None else None
+        output_tokens = getattr(usage, "output_tokens", None) if usage is not None else None
+        usage_known = _valid_token_count(input_tokens) and _valid_token_count(output_tokens)
+        _record_cost(
+            f"openai:{self.model}",
+            input_tokens if usage_known else 0,
+            output_tokens if usage_known else 0,
+            0.0,
+            usage_known=usage_known,
+        )
 
         return self._parse_response(response)
 
