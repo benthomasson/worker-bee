@@ -134,9 +134,15 @@ def _parse_cli_json(output: str, model: str) -> str:
     try:
         data = json.loads(output)
     except (json.JSONDecodeError, ValueError):
+        # The response is still a completed model call even when its JSON
+        # envelope is malformed.  Record the call with unknown usage rather
+        # than silently dropping it from accounting.
+        _record_cost(model, 0, 0, 0.0)
         return output
 
     if not isinstance(data, dict):
+        # Valid JSON scalars/arrays cannot contain provider usage metadata.
+        _record_cost(model, 0, 0, 0.0)
         return output
 
     if model.startswith("gemini") or model.startswith("gemini:"):

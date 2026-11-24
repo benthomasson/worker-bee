@@ -4,6 +4,38 @@ from threading import Barrier, Lock
 import worker_bee.llm as llm
 
 
+def test_cli_parse_failure_records_call_without_known_usage():
+    llm.reset_cost_tracker()
+
+    output = "not valid json"
+    assert llm._parse_cli_json(output, "claude") == output
+    assert llm.get_cost_summary() == {
+        "calls": 1,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_cost_usd": 0.0,
+        "by_model": {
+            "claude": {
+                "calls": 1,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_cost_usd": 0.0,
+            }
+        },
+    }
+    assert llm.get_last_usage() == {"prompt_tokens": 0, "completion_tokens": 0}
+
+
+def test_cli_non_object_json_records_call_without_known_usage():
+    llm.reset_cost_tracker()
+
+    output = "[1, 2, 3]"
+    assert llm._parse_cli_json(output, "gemini") == output
+    assert llm.get_cost_summary()["calls"] == 1
+    assert llm.get_cost_summary()["by_model"]["gemini"]["calls"] == 1
+    assert llm.get_last_usage() == {"prompt_tokens": 0, "completion_tokens": 0}
+
+
 def test_langfuse_handler_initialization_is_thread_safe(monkeypatch):
     instances = []
     instances_lock = Lock()
