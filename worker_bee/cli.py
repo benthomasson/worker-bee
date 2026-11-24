@@ -131,6 +131,10 @@ def _main(argv: list[str] | None = None) -> int:
     sub_run.add_argument("--dry-run", action="store_true", help="Print prompts without dispatching")
     sub_run.add_argument("--requests-per-second", type=float, default=None,
                          help="Maximum request start rate for this model")
+    sub_run.add_argument("--progress-file", default=None, metavar="FILE",
+                         help="Checkpoint items serially after each response; an existing FILE requires --resume")
+    sub_run.add_argument("--resume", action="store_true",
+                         help="Resume from --progress-file, retrying incomplete items (cannot be combined with --dry-run)")
 
     args = parser.parse_args(argv)
 
@@ -327,6 +331,8 @@ def _main(argv: list[str] | None = None) -> int:
             model=args.model,
             dry_run=args.dry_run,
             requests_per_second=args.requests_per_second,
+            progress_file=args.progress_file,
+            resume=args.resume,
         )
         return 0
 

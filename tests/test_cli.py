@@ -3,6 +3,7 @@
 import shutil
 import subprocess
 import sys
+from unittest.mock import patch
 
 import pytest
 
@@ -13,6 +14,24 @@ def test_no_command_prints_help_and_succeeds(capsys):
     assert main([]) == 0
     captured = capsys.readouterr()
     assert "usage:" in captured.out
+
+
+def test_run_forwards_progress_options(tmp_path):
+    with patch("worker_bee.pipeline.run_pipeline") as run:
+        assert main(["run", "brain.db", "--progress-file", str(tmp_path / "p.json"), "--resume"]) == 0
+    run.assert_called_once_with(
+        "brain.db", model="ollama:qwen3.8:27b", dry_run=False,
+        requests_per_second=None, progress_file=str(tmp_path / "p.json"), resume=True,
+    )
+
+
+def test_run_help_mentions_progress_options(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        main(["run", "--help"])
+    assert exc_info.value.code == 0
+    output = capsys.readouterr().out
+    assert "--progress-file" in output
+    assert "--resume" in output
 
 
 def test_argparse_errors_keep_status_two():
