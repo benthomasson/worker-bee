@@ -140,6 +140,7 @@ commit_changes() {
     local msg="$1"
     cd "$REPO_DIR"
     git add -A
+    git reset HEAD -- .worker-bee/ 2>/dev/null || true
     git diff --cached --quiet && return 0
     git commit -m "$msg" || true
 }
