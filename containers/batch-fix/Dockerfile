@@ -1,6 +1,8 @@
 FROM quay.io/centos/centos:stream9
 
 ARG BEE_USER=bee
+ARG BEE_UID=1001
+ARG BEE_GID=1006
 
 # System packages
 RUN dnf install -y --allowerasing \
@@ -9,8 +11,9 @@ RUN dnf install -y --allowerasing \
         curl which procps-ng \
     && dnf clean all
 
-# Create bee user
-RUN useradd -m -s /bin/bash ${BEE_USER}
+# Create bee user with matching host UID/GID for mount mode
+RUN groupadd -g ${BEE_GID} ${BEE_USER} \
+    && useradd -m -s /bin/bash -u ${BEE_UID} -g ${BEE_GID} ${BEE_USER}
 
 # Install uv + worker-bee + reasonsforge as bee user
 USER ${BEE_USER}
