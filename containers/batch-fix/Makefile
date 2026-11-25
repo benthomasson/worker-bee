@@ -41,11 +41,11 @@ fix:
 		$(IMAGE):$(TAG)
 
 # ─── Mount mode: bind-mount local repos (no credentials needed, faster) ───
-# Uses --security-opt label=disable to avoid SELinux relabeling issues
-# and read-only repo mount (expert is rw for DB updates).
+# Uses --userns=keep-id so container bee UID matches host UID (both 1001).
 
 run-local:
 	podman run -it \
+		--userns=keep-id \
 		--security-opt label=disable \
 		-v $(REPO_PATH):/home/bee/workspace/repo \
 		-v $(EXPERT_PATH):/home/bee/workspace/expert \
@@ -57,6 +57,7 @@ run-local:
 
 fix-local:
 	podman run -it \
+		--userns=keep-id \
 		--security-opt label=disable \
 		-v $(REPO_PATH):/home/bee/workspace/repo \
 		-v $(EXPERT_PATH):/home/bee/workspace/expert \
@@ -68,6 +69,7 @@ fix-local:
 
 verify-local:
 	podman run -it \
+		--userns=keep-id \
 		--security-opt label=disable \
 		-v $(REPO_PATH):/home/bee/workspace/repo \
 		-v $(EXPERT_PATH):/home/bee/workspace/expert \
