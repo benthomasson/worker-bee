@@ -166,6 +166,33 @@ abandon_branch() {
     echo "Returned to main. Fix branch $branch preserved for inspection."
 }
 
+get_test_command() {
+    local config="$EXPERT_DIR/.forge/code/config.json"
+    if [ -f "$config" ]; then
+        python3 -c "import json,sys; c=json.load(open(sys.argv[1])); print(c.get('test_command',''))" "$config" 2>/dev/null || echo ""
+    else
+        echo ""
+    fi
+}
+
+run_tests() {
+    local test_cmd
+    test_cmd=$(get_test_command)
+    if [ -z "$test_cmd" ]; then
+        log "No test_command configured — skipping tests"
+        return 0
+    fi
+    step "Running tests: $test_cmd"
+    cd "$REPO_DIR"
+    if eval "$test_cmd"; then
+        log "Tests passed"
+        return 0
+    else
+        log "Tests FAILED"
+        return 1
+    fi
+}
+
 # ═══════════════════════════════════════════
 # Task: fix-belief (single belief pipeline)
 # ═══════════════════════════════════════════
@@ -353,6 +380,11 @@ d = json.load(open(sys.argv[1]))
 print(f\"  Verdict: {d['verdict']}\")
 print(f\"  Reason: {d['reason']}\")
 " "$VERIFY_JSON" || true
+
+            if ! run_tests; then
+                abandon_branch "$BRANCH" "Tests failed after fix for $BELIEF_ID"
+                return 1
+            fi
 
             step "Squash-merging $BRANCH into main"
             cd "$REPO_DIR"
