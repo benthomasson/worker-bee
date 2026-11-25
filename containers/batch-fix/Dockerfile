@@ -30,10 +30,8 @@ RUN mkdir -p /home/${BEE_USER}/workspace
 
 USER root
 
-# Git identity
-RUN git config --system user.email 'bee@worker-bee' \
-    && git config --system user.name 'Worker Bee' \
-    && git config --system init.defaultBranch main
+# Git defaults (identity comes from mounted ~/.gitconfig in mount mode)
+RUN git config --system init.defaultBranch main
 
 RUN chmod 755 /home/${BEE_USER}
 

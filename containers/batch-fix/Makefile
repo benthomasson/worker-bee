@@ -49,6 +49,7 @@ run-local:
 		--security-opt label=disable \
 		-v $(REPO_PATH):/home/bee/workspace/repo \
 		-v $(EXPERT_PATH):/home/bee/workspace/expert \
+		-v $(HOME)/.gitconfig:/home/bee/.gitconfig:ro \
 		-e OPENAI_API_KEY=$(OPENAI_API_KEY) \
 		-e TASK_TYPE=batch-fix \
 		-e BELIEF_IDS="$(BELIEF_IDS)" \
@@ -61,6 +62,7 @@ fix-local:
 		--security-opt label=disable \
 		-v $(REPO_PATH):/home/bee/workspace/repo \
 		-v $(EXPERT_PATH):/home/bee/workspace/expert \
+		-v $(HOME)/.gitconfig:/home/bee/.gitconfig:ro \
 		-e OPENAI_API_KEY=$(OPENAI_API_KEY) \
 		-e TASK_TYPE=fix-belief \
 		-e BELIEF_ID="$(BELIEF_ID)" \
@@ -73,6 +75,7 @@ verify-local:
 		--security-opt label=disable \
 		-v $(REPO_PATH):/home/bee/workspace/repo \
 		-v $(EXPERT_PATH):/home/bee/workspace/expert \
+		-v $(HOME)/.gitconfig:/home/bee/.gitconfig:ro \
 		-e OPENAI_API_KEY=$(OPENAI_API_KEY) \
 		-e TASK_TYPE=verify \
 		-e BELIEF_ID="$(BELIEF_ID)" \
