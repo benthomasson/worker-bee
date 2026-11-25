@@ -382,7 +382,8 @@ print(f\"  Reason: {d['reason']}\")
 " "$VERIFY_JSON" || true
 
             if ! run_tests; then
-                abandon_branch "$BRANCH" "Tests failed after fix for $BELIEF_ID"
+                log "Tests failed — fix branch $BRANCH preserved for inspection"
+                cd "$REPO_DIR" && git checkout main
                 return 1
             fi
 
