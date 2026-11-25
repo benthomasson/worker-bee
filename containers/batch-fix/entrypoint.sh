@@ -306,7 +306,7 @@ Do not introduce new functionality beyond what is needed to address the findings
 $(cat "$REPORT")
 --- END REVIEW REPORT ---"
 
-            cd "$SCRATCH_DIR"
+            cd "$REPO_DIR"
             worker-bee edit "$TASK" \
                 --db "$DB_PATH" \
                 --model "$MODEL" \
